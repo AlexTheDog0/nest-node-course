@@ -1,114 +1,147 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Архітектурна записка курсового проєкту: Marketplace API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Цей репозиторій містить наскрізний курсовий проєкт — сервіс **Marketplace API**, спроєктований відповідно до вимог надійності, масштабованості та контрактної специфікації.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## 1. Що це за сервіс
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+**Marketplace API** — це бекенд-платформа для простого інтернет-магазину (маркетплейсу). Сервіс вирішує проблему швидкого та зручного замовлення фізичних товарів клієнтами, а також автоматизує контроль залишків на складах та інформування покупців про статус їхніх покупок. Адміністратори платформи мають можливість гнучко керувати асортиментом та відстежувати транзакції.
 
-## Project setup
+### User Stories (Сценарії користувачів):
+1. **Як гість**, я хочу переглядати каталог товарів з актуальними цінами, фільтрами та фотографіями, щоб обрати потрібні позиції.
+2. **Як клієнт**, я хочу оформити замовлення, додавши декілька товарів у кошик, та ініціювати оплату, щоб зарезервувати товар на складі.
+3. **Як клієнт**, я хочу отримати лист-підтвердження на електронну пошту після успішної оплати замовлення, щоб переконатися в його відправці.
+4. **Як адміністратор**, я хочу додавати нові товари, завантажувати їхні зображення та коригувати залишки на складі, щоб підтримувати каталог в актуальному стані.
+
+---
+
+## 2. Домен
+
+Сервіс оперує наступними ключовими сутностями:
+*   **User (Користувач)** — зберігає дані користувачів та їхні ролі (Клієнт, Адміністратор). Зв'язок `1:N` із сутністю `Order`.
+*   **Product (Товар)** — опис товару, ціна та кількість на складі. Зв'язок `1:N` із `ProductImage` та `M:N` із `Order` через проміжну таблицю `OrderItem`.
+*   **ProductImage (Зображення товару)** — посилання на завантажені у хмару фотографії товарів. Зв'язок `N:1` із `Product`.
+*   **Order (Замовлення)** — містить інформацію про покупця, статус замовлення та загальну суму. Зв'язок `1:1` із `Payment` та `1:N` із `OrderItem`.
+*   **OrderItem (Елемент замовлення)** — проміжна сутність для збереження зрізу ціни та кількості товару на момент покупки. Зв'язок `N:1` із `Product`.
+*   **Payment (Платіж)** — запис транзакції оплати замовлення. Зберігає статус платежу та ідемпотентний токен. Зв'язок `1:1` із `Order`.
+
+### Таблиця перевірки домену (Sieve Test):
+
+| ✔ | Вимога до домену | Де реалізується в проєкті |
+| :-: | :--- | :--- |
+| **[x]** | ≥ 2 ролі користувачів із різними правами | **ДЗ#24** — роль `Admin` (керування товарами) та роль `Client` (перегляд, купівля). |
+| **[x]** | Обмежений ресурс, за який конкурують | **ДЗ#14** — залишок товару на складі (`Product.stock`), який зменшується під час замовлення. |
+| **[x]** | Операція з незворотним ефектом | **ДЗ#22** — списання коштів та фіксація платежу (`Payment`) з використанням Outbox та Idempotency-Key. |
+| **[x]** | Подія, про яку треба когось сповістити | **ДЗ#19** — подія `order.paid`, що запускає асинхронне надсилання email через чергу повідомлень. |
+| **[x]** | Сутність із файлами | **ДЗ#26** — зображення товарів (`ProductImage`), які зберігаються на S3 із завантаженням через presigned URLs. |
+| **[x]** | Дані, які часто читають і рідко змінюють | **ДЗ#23** — каталог товарів (`Product`), який кешується у Redis за паттерном cache-aside. |
+| **[x]** | 4–6 сутностей зі звʼязками й важким запитом | **ДЗ#12, #13** — отримання списку товарів з пагінацією за курсором, фільтрацією та агрегацією зображень. |
+
+---
+
+## 3. Архітектурні рішення
+
+Для реалізації сервісу обрано збалансований технологічний стек, орієнтований на надійність та простоту локального запуску:
+
+*   **Compute Model:** Node.js + фреймворк NestJS. Це стандартний інструмент курсу, який забезпечує строгу типізацію (TypeScript), модульну структуру коду та просту автоматичну генерацію OpenAPI-спеки з декораторів.
+*   **База даних:** PostgreSQL. Повноцінна реляційна СУБД, що підтримує ACID-транзакції та рівні ізоляції, які є критично важливими для недопущення овербукінгу товарів на складі.
+*   **Асинхронність та черги:** Redis + BullMQ. Redis виконує роль швидкого in-memory сховища для кешування каталогу товарів, а бібліотека BullMQ забезпечує надійну роботу черги задач для надсилання email-сповіщень.
+*   **Авторизація (Auth):** stateless JWT-токени. Ролі користувача (Admin/Client) зашиваються безпосередньо в токен, що дозволяє проводити RBAC-валідацію без додаткових запитів до БД.
+*   **Робота з файлами:** S3-сумісне сховище (AWS S3 для продакшну та MinIO для локальної розробки).
+*   **Deploy (Деплой):** Контейнеризація за допомогою Docker та Docker Compose для локального запуску всієї інфраструктури однією командою. Для хостингу буде використано Render або Railway.
+
+---
+
+## 4. Trade-offs (Архітектурні компроміси)
+
+*   **Реляційна БД (PostgreSQL) замість NoSQL (MongoDB):**  
+    Ми свідомо обрали PostgreSQL, хоча MongoDB дозволила б швидше розробляти схеми даних без міграцій. Проте маркетплейс потребує суворої узгодженості даних (Strong Consistency) при декременті залишків товарів на складі під конкурентним навантаженням. Використання NoSQL із паттерном Eventual Consistency змусило б нас писати складну прикладну логіку для запобігання овербукінгу (продажу товару, якого немає в наявності), що ускладнило б систему.
+*   **Модульний моноліт замість мікросервісів:**  
+    Проєкт розробляється як єдиний бекенд-додаток (моноліт), розділений на логічні модулі (`UsersModule`, `ProductsModule`, `OrdersModule`). Ми відмовилися від мікросервісної архітектури, оскільки на старті вона створила б надмірні інфраструктурні витрати, складність налаштування мережевих викликів та розподілених транзакцій (Saga/Outbox), що є недоцільним для першої версії системи.
+*   **Пошук у каталозі через PostgreSQL full-text search замість Elasticsearch:**  
+    Для реалізації пошуку за назвою та описом товарів ми використовуємо вбудовані можливості повнотекстового пошуку PostgreSQL. Ми свідомо не додаємо в інфраструктуру Elasticsearch/OpenSearch, щоб уникнути витрат на синхронізацію даних між БД та пошуковим рушієм, а також знизити вимоги додатка до оперативної пам’яті на етапі хостингу.
+
+---
+
+## 5. Журнал архітектурних рішень (ADR)
+*(Буде заповнюватися в процесі виконання наступних ДЗ при зміні архітектури)*
+
+
+---
+
+## 6. ДЗ: OpenAPI та runtime-контракт (варіант Б)
+
+Архітектурна записка вище описує цільовий проєкт. Поточна навчальна реалізація використовує NestJS 12, Express 5 та express-openapi-validator 5.6.2. Сумісність перевіряється HTTP-тестами. OpenAPI написаний вручну; PostgreSQL, JWT, Redis та S3 на цьому етапі не потрібні.
+
+Реалізовано три маршрути: `GET /products`, `GET /products/{id}`, `POST /products`. Два маршрути Users залишаються контрактом майбутнього етапу; runtime-частина ДЗ вимагає 2–3 маршрути. Авторизація зараз вимкнена (`security: []`); описані 401/403 призначені для наступного етапу.
+
+### Встановлення й запуск
+
+Рекомендовано Node.js 22.22.3+ (або 24.15+) та npm відповідно до engines залежностей Nest CLI. Перевірки також пройдено на Node.js 22.17.0, де npm показує engine/peer warnings. Усі команди виконуються з кореня репозиторію:
 
 ```bash
-$ npm install
+npm install
+npm start
 ```
 
-## Compile and run the project
+API: `http://localhost:3000`; порт можна змінити через `PORT`. Товари та ключі ідемпотентності зберігаються в пам’яті й скидаються після перезапуску. Початковий товар має ID 1. Ключі діють для POST /products до перезапуску одного процесу; це не розподілене або довготривале сховище.
+
+### Автоматичне приймання
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm run check:homework
 ```
 
-## Run tests
+Команда запускає lint, bundle, перевірку вимог специфікації, збірку та HTTP-тести. Тести самі створюють ізольований NestJS-застосунок із тим самим middleware та фільтром на вільному порту; запускати `npm start` для них не потрібно.
+
+Окремі перевірки:
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm run spec:lint
+npm run spec:check
+npm run test:contract
+npm run build
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Еквівалентні команди з ДЗ:
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npx @redocly/cli lint openapi/openapi.yaml
+npx @redocly/cli bundle openapi/openapi.yaml -o spec.json
+node scripts/check-spec.mjs
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+`spec.json` — згенерований bundle. Попередження Redocly про localhost дозволене критеріями. Автотести перевіряють відсутній ключ, невалідне тіло, 201, replay, конфлікт ключа, конкурентні повтори, пагінацію, некоректний курсор, 404, пошкоджений JSON та порушення схеми відповіді. Для останнього тест тимчасово підміняє метод сервісу лише у тестовому застосунку та відновлює його у finally; production-контролер не змінюється.
 
-## Observability
+### Ручні перевірки після npm start
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+Без ключа → 400 application/problem+json із detail про idempotency-key:
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+```bash
+curl -i -X POST http://localhost:3000/products -H 'Content-Type: application/json' -d '{"name":"Notebook","price_cents":15000,"stock":3}'
+```
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+Невалідне тіло → 400 із detail від валідатора:
 
-## Resources
+```bash
+curl -i -X POST http://localhost:3000/products -H 'Content-Type: application/json' -H 'Idempotency-Key: invalid-1' -d '{"name":"Notebook","price_cents":15000,"stock":-1}'
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+Валідне створення → 201. Повтор тієї самої команди → той самий 201, тіло та `Idempotency-Replay: true`. Порядок JSON-полів не впливає на порівняння. Той самий ключ з іншим тілом → 422 Problem:
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```bash
+curl -i -X POST http://localhost:3000/products -H 'Content-Type: application/json' -H 'Idempotency-Key: create-1' -d '{"name":"Notebook","price_cents":15000,"stock":3}'
+```
 
-## Support
+Перша сторінка; отриманий next_cursor передайте без змін у cursor. Null означає кінець:
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+```bash
+curl -i 'http://localhost:3000/products?limit=1'
+curl -i 'http://localhost:3000/products?limit=1&cursor=MQ'
+curl -i 'http://localhost:3000/products?limit=101'
+curl -i 'http://localhost:3000/products?cursor=aGVsbG8'
+curl -i 'http://localhost:3000/products/999'
+```
 
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Останні три запити повертають 400, 400 та 404 у форматі Problem. Ціна — ціле число копійок. JSON-парсер працює перед валідатором, `validateRequests` і `validateResponses` увімкнені. Express error-handler обробляє помилки middleware; глобальний NestJS filter — винятки контролерів та помилки валідації відповідей.
