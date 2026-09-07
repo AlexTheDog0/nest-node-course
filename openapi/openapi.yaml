@@ -10,6 +10,24 @@ servers:
     description: Local development server
 security: []
 paths:
+  /health:
+    get:
+      operationId: health
+      summary: Checks health of current app
+      responses:
+        '200':
+          description: Healthy!
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  uptime:
+                    type: number
+        '500':
+          description: Problem during health check!
   /users:
     get:
       operationId: listUsers

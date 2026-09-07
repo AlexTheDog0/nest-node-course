@@ -1,10 +1,11 @@
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { AppModule, ObserveInstrument } from './app.module.js';
+import { AppModule } from './app.module.js';
 import { configureApp } from './configure-app.js';
+import { ConfigService } from '@nestjs/config';
+import type { Env } from './config/env.schema.js';
 
-const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-  instrument: ObserveInstrument,
-});
+const app = await NestFactory.create<NestExpressApplication>(AppModule);
 configureApp(app);
-await app.listen(process.env.PORT ?? 3000);
+const config = app.get(ConfigService<Env, true>);
+await app.listen(config.get('PORT',{infer: true}));
