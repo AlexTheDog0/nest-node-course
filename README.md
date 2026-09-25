@@ -1,5 +1,72 @@
 # Архітектурна записка курсового проєкту: Marketplace API
 
+## ДЗ №12 — PostgreSQL: схема, індекси та пошук
+
+Для перевірки ДЗ №12 потрібні Docker Compose v2 і Python 3. Використовуй окремий
+`docker-compose.hw12.yml`: PostgreSQL 17, власний volume, порт `127.0.0.1:5433`,
+без залежності від `.env` та локального файла секретів. Це ізольований навчальний стенд; наявний
+`docker-compose.yml` і база попереднього ДЗ залишаються без змін.
+Усі команди нижче — з кореня репозиторію.
+
+Підняти базу (працює зі свіжого клону):
+```bash
+docker compose -f docker-compose.hw12.yml up -d --wait
+```
+
+Підключитись:
+```bash
+docker compose -f docker-compose.hw12.yml exec db psql -X -U app -d marketplace
+```
+
+Всередині `psql` команда `SELECT 1;` повертає `1`; `\q` завершує сесію.
+Креденшели стенда: `app` / `homework-development-only`, база `marketplace`.
+Вони демонстраційні, записані в Compose й не призначені для production.
+
+Головна таблиця — **orders** (200 000 рядків), таблиця пошуку q4 — **products**
+(100 000 рядків). Також є `users` (20 000) і `order_items` (200 000), три FK.
+Ціна в SQL — `numeric(12,2)` у гривнях; HTTP-контракт попереднього етапу
+з `price_cents` залишається без змін, майбутній DB-адаптер має конвертувати одиниці.
+Товари API поки зберігаються в пам’яті: це ДЗ готує дата-шар для наступних етапів.
+
+Повний автоматичний цикл на **порожній** базі:
+```bash
+python3 scripts/check-db.py
+```
+
+Скрипт застосовує `schema.sql`, `seed.sql`, знімає чотири плани до індексів,
+застосовує `indexes.sql`, виконує `ANALYZE` та знімає кожен план тричі.
+Перевіряє Seq Scan до / відсутність після, імена й використання всіх індексів,
+обсяг, FK, partial/expression, GIN по tsvector, однакові результати запитів,
+морфологію, оновлення generated-колонки та відхилення некоректних даних.
+Повні плани зберігаються в ігнорованій теці `tmp/hw12/`.
+Повторний запуск на непорожній базі навмисно відхиляється.
+
+Для повторення з нуля видали **лише дані навчального стенда ДЗ №12**:
+```bash
+docker compose -f docker-compose.hw12.yml down -v
+```
+Після цього повтори команди підняття та автоматичної перевірки вище.
+
+Ручний еквівалент циклу на порожній БД:
+```bash
+docker compose -f docker-compose.hw12.yml exec -T db psql -X -v ON_ERROR_STOP=1 -U app -d marketplace < db/schema.sql
+docker compose -f docker-compose.hw12.yml exec -T db psql -X -v ON_ERROR_STOP=1 -U app -d marketplace < db/seed.sql
+for n in 1 2 3 4; do docker compose -f docker-compose.hw12.yml exec -T db psql -X -v ON_ERROR_STOP=1 -U app -d marketplace -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$n.sql)"; done
+docker compose -f docker-compose.hw12.yml exec -T db psql -X -v ON_ERROR_STOP=1 -U app -d marketplace < db/indexes.sql
+docker compose -f docker-compose.hw12.yml exec -T db psql -X -v ON_ERROR_STOP=1 -U app -d marketplace -c 'ANALYZE;'
+for pass in 1 2 3; do for n in 1 2 3 4; do docker compose -f docker-compose.hw12.yml exec -T db psql -X -v ON_ERROR_STOP=1 -U app -d marketplace -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/q$n.sql)"; done; done
+```
+
+Виміри та пояснення: [db/OPTIMIZATIONS.md](db/OPTIMIZATIONS.md).
+
+**Підключення застосунку:** сховище секретів
+із `dev` / `prod` реалізовано через локальний Infisical — див. розділ
+Configuration нижче. Для грейдера SQL-стенд запускається незалежно від Infisical.
+
+Перевірка свіжого клону з віддаленої гілки потребує публікації змін; у поточній
+роботі коміти та push не виконуються. Локальна перевірка копії без `.env`,
+`secrets/` і `node_modules/` описана у звіті.
+
 Цей репозиторій містить наскрізний курсовий проєкт — сервіс **Marketplace API**, спроєктований відповідно до вимог надійності, масштабованості та контрактної специфікації.
 
 ---
@@ -150,22 +217,108 @@ curl -i 'http://localhost:3000/products/999'
 
 ## Configuration
 
-Цей розділ описує запуск поточного етапу ДЗ та доповнює інструкції попереднього етапу вище. Nest запускається локально, PostgreSQL 17 — у Docker Compose. Потрібні Node.js 22.22.3+, npm та запущений Docker із Compose. Команди нижче виконуються з кореня репозиторію.
+Поточний режим ДЗ №12 — локальний **Infisical** (`http://localhost:8088`),
+Nest на хості та база `marketplace` із `docker-compose.hw12.yml` на `127.0.0.1:5433`.
+Потрібні Docker Compose v2, Node.js 22.22.3+ та npm.
+
+### Infisical: налаштування та запуск
+
+Після підняття й наповнення БД командами розділу ДЗ №12:
+
+```bash
+npm ci
+npm run infisical:up
+npm run infisical:setup
+npm run start:infisical -- dev
+```
+
+Перевірка: `curl http://localhost:9999/health` → `{"status":"ok","uptime":...}`.
+Для оточення `prod` зупини dev-процес та запусти `npm run start:infisical -- prod`.
+Обидва оточення навчальні й вказують на ту саму локальну базу ДЗ №12;
+назва `prod` не означає розгортання в інтернеті.
+
+`infisical:up` генерує ключі шифрування й пароль внутрішньої БД у
+`secrets/infisical/server.env` (права 0600), не перезаписуючи їх при повторному запуску.
+Файл потрібен для запуску самого сховища; DB_URL застосунку в ньому немає.
+Далі запускаються Infisical v0.165.16, його окремий PostgreSQL і Redis.
+
+`infisical:setup` одноразово створює локального адміністратора, організацію,
+проєкт Marketplace HW12 та секрет `DB_URL` в `dev` і `prod`. Повторний запуск
+зберігає значення секретів і видає новий токен застосунку на 30 днів.
+Дані входу в UI: `secrets/infisical/admin-login.json`; відкрий цей файл локально.
+Адміністративний токен зберігається окремо в `bootstrap.json`; застосунок отримує
+лише `app-token` identity з роллю `viewer` у цьому проєкті та `no-access` в організації.
+Уся тека `secrets/` ігнорується Git і Dockerfile-контекстом; значення не друкуються скриптами.
+
+Запуск використовує офіційний REST API Infisical, тому CLI та SDK встановлювати не потрібно.
+Версію й параметри стенда звірено з [офіційним Compose Infisical](https://github.com/Infisical/infisical/blob/v0.165.16/docker-compose.prod.yml);
+схема API запущеної версії доступна на `http://localhost:8088/api/docs/json`.
+Скрипт читає DB_URL зі сховища й передає його дочірньому процесу Nest у пам’яті.
+В режимі `CONFIG_SOURCE=infisical` локальний `.env` **не завантажується**.
+Zod перевіряє конфігурацію до створення Nest-провайдерів; при помилці секретні значення
+не включаються в повідомлення. Нових env-файлів із DB_URL немає.
+
+### Ротація та перевірка Infisical
+
+При запущеному через Infisical застосунку:
+
+```bash
+curl http://localhost:9999/health
+npm run rotate:infisical
+curl http://localhost:9999/health
+```
+
+Скрипт змінює пароль лише локальної ролі `app` у HW12, оновлює DB_URL у двох
+оточеннях і закриває старі з’єднання. `pg.Pool` перечитує актуальний пароль через
+Infisical для кожного нового з’єднання. Ротація не перезапускає Nest.
+Якщо оновлення сховища не вдалося, скрипт намагається відновити попередній пароль
+і обидва значення секретів; помилка відновлення повертає ненульовий код.
+Між зміною пароля та записом у сховище є коротке вікно розбіжності — безперервна
+доступність кожного запиту під час цього вікна не гарантується.
+Зміна хоста, порту, користувача чи назви БД вимагає рестарту застосунку.
+Якщо Infisical недоступний, нові з’єднання завершуються помилкою; кешований пароль
+не використовується як прихований fallback.
+
+```bash
+npm run check:env
+npm test
+npm run check:infisical
+```
+
+Остання команда запускає тимчасові dev/prod-процеси на портах 19991/19992,
+перевіряє обсяг HW12-таблиць через креденшели зі сховища, заборону запису секретів
+для застосунку та health/uptime до й після **реальної ротації тестового пароля**.
+Після перевірки процеси зупиняються. Докази без секретів: `tmp/infisical-verification.json`.
+
+Якщо видалено HW12 volume, нова БД матиме початковий демонстраційний пароль,
+а Infisical збереже ротований. Після повторного підняття БД виконай
+`npm run rotate:infisical`, щоб синхронізувати їх, і заново застосуй SQL-файли.
+Цей скрипт використовує адміністративний локальний socket усередині HW12-контейнера.
+Не видаляй ключі `server.env` окремо від volume Infisical — вони потрібні для
+розшифрування збережених секретів.
 
 ### Змінні конфігурації
 
-Єдина схема застосунку — `src/config/env.schema.ts`. `ConfigModule.forRoot({ validate })` перевіряє конфігурацію на старті та показує всі помилки разом. Код читає перевірені значення через `ConfigService<Env, true>`. Змінні середовища процесу мають пріоритет над `.env`.
+Єдина схема застосунку — `src/config/env.schema.ts`; код отримує перевірені значення
+через `ConfigService<Env, true>`. `.env.example` — лише контракт із фейковими значеннями.
 
-| Змінна | Вимоги | Приклад / default |
+| Змінна | Вимоги | Джерело / приклад |
 | --- | --- | --- |
-| `PORT` | Обов’язкове ціле число 1–65535; HTTP-порт Nest | `9999`; default немає |
-| `DB_HOST` | Обов’язковий непорожній рядок; адреса Postgres | `localhost` |
-| `DB_USER` | Обов’язковий непорожній рядок; роль БД | `admin` |
-| `DB_NAME` | Обов’язковий непорожній рядок; назва бази | `admin` |
-| `DB_PORT` | Ціле число 1–65535 | Default `5432` при відсутності |
-| `DB_PASSWORD_FILE` | Обов’язковий непорожній шлях до файла пароля | `secrets/db_password` |
+| `PORT` | Ціле 1–65535 | Оточення запуску; Infisical launcher: `9999` за замовчуванням |
+| `CONFIG_SOURCE` | `file` або `infisical`; default `file` | Launcher встановлює `infisical` |
+| `DB_URL` | Обов’язковий для Infisical: PostgreSQL URL із користувачем, паролем і БД, без query-параметрів | **Сховище Infisical**, проєкт Marketplace HW12, `dev` / `prod` |
+| `INFISICAL_API_URL` | Обов’язковий для Infisical | Локальна metadata, `http://localhost:8088` |
+| `INFISICAL_PROJECT_ID` | Обов’язковий для Infisical | `secrets/infisical/client.json` |
+| `INFISICAL_ENVIRONMENT` | `dev` або `prod` | Аргумент launcher |
+| `INFISICAL_TOKEN_FILE` | Шлях до токена читання | `secrets/infisical/app-token`, передається launcher |
+| `DB_HOST` | Обов’язковий лише для `file` | Локальний `.env`, `localhost` |
+| `DB_USER` | Обов’язковий лише для `file` | Локальний `.env`, `admin` |
+| `DB_NAME` | Обов’язковий лише для `file` | Локальний `.env`, `marketplace` |
+| `DB_PORT` | Ціле 1–65535 для `file`; default `5432` | Локальний `.env`; Infisical бере порт із DB_URL |
+| `DB_PASSWORD_FILE` | Обов’язковий лише для `file` | Шлях із `.env`, пароль із локального файла `secrets/db_password` |
 
-Відносний шлях до секрету рахується від робочої теки застосунку. Сам пароль не є env-змінною. `.env.example` — контракт у git, який автоматично не завантажується. `.env` і `secrets/` виключені з Git та Docker-контексту через `.gitignore` і `.dockerignore`.
+Нижче збережені інструкції **режиму `file` із ДЗ №11**. Вони використовують
+попередню БД на порту 5432 і `rotate.sh`; для ДЗ №12 користуйся командами Infisical вище.
 
 ### Перший запуск
 

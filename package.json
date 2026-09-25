@@ -6,6 +6,11 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "infisical:up": "node scripts/init-infisical-keys.mjs && docker compose -f docker-compose.infisical.yml up -d --wait",
+    "infisical:setup": "node scripts/setup-infisical.mjs",
+    "start:infisical": "npm run build && node scripts/start-infisical.mjs",
+    "rotate:infisical": "node scripts/rotate-infisical.mjs",
+    "check:infisical": "npm run build && node scripts/check-infisical.mjs",
     "build": "nest build",
     "deploy": "nest deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
