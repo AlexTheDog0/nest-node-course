@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import type { Env } from './config/env.schema.js';
 
 const app = await NestFactory.create<NestExpressApplication>(AppModule);
+app.enableShutdownHooks();
 configureApp(app);
 const config = app.get(ConfigService<Env, true>);
 await app.listen(config.get('PORT',{infer: true}));

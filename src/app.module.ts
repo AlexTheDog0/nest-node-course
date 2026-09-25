@@ -3,13 +3,14 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { ProductsModule } from './products/products.module.js';
 import { ConfigModule } from '@nestjs/config'
-import { validate } from './config/env.schema.js';
+import { ignoreLocalEnv, validate } from './config/env.schema.js';
 import { DatabaseModule } from './database/database.module.js';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       validate,
+      ignoreEnvFile: ignoreLocalEnv(),
     }),
     ProductsModule,
     DatabaseModule,
