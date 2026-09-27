@@ -1,11 +1,174 @@
 # Архітектурна записка курсового проєкту: Marketplace API
 
+## ДЗ №13 — TypeORM
+
+Чотири entities у `src/entities/` відтворюють таблиці ДЗ №12: `users`,
+`products`, `orders`, `order_items`. `OrderItem` — явна M:N-сутність із кількістю
+й історичною ціною, складеним PK `(order_id, product_id)`. Усі bigint ID — рядки,
+щоб не втрачати точність JavaScript. Nullable, CHECK, defaults, identity,
+generated `search_vector` і всі чотири індекси SQL-схеми збережені.
+
+Свідома зміна порівняно з ДЗ №12: `price numeric(12,2)` → `price_cents integer`,
+`unit_price numeric(12,2)` → `unit_price_cents integer`, одиниця — копійка.
+Це початкова міграція **для чистої БД**, а не конвертація заповненої HW12-бази.
+SQL-файли в `db/` залишаються історичним стендом ДЗ №12.
+ORM-шар не змінює наявний HTTP API з товарами в пам’яті.
+
+Структура:
+
+| Шлях | Призначення |
+| --- | --- |
+| `src/entities/` | User, Product, Order, OrderItem та relations |
+| `src/migrations/` | Згенерована й перевірена початкова міграція, робочий down |
+| `src/data-source.ts` | Лише process.env, synchronize: false |
+| `src/seed.ts` | Транзакційний детермінований повторюваний seed |
+| `src/demo-nplus1.ts` | SQL-лог, лічильник, порівняння результатів до/після |
+| `src/report.ts`, `src/reports/product-revenue.ts` | Виторг по товарах через QueryBuilder |
+| `scripts/with-secrets.sh` | Infisical CLI та SKIP_VAULT для CI/грейдера |
+| `test/orm/` | Перевірка seed, звіту, relations, обмежень і обгортки |
+
+## Grading
+
+Потрібні Node.js 22.22.3+ (або 24.15+), npm, Docker Compose v2.
+Виконувати в корені свіжого клону; `.env`, `.secrets/`, `secrets/` та Infisical CLI
+для цього сценарію не потрібні. Порт 5434 має бути вільний.
+Compose має власний volume і healthcheck; дев-креденшели не є секретом.
+
+```bash
+docker compose up -d --wait
+
+export DB_HOST=127.0.0.1 DB_PORT=5434 DB_USER=app DB_PASSWORD=homework-development-only DB_NAME=marketplace
+
+export SKIP_VAULT=1    # у грейдера немає доступу до сховища
+```
+
+Якщо поточна оболонка вже має `DB_URL`, виконай `unset DB_URL`: URL має пріоритет
+над окремими DB_*; у свіжому оточенні це не потрібно.
+
+```bash
+npm ci && npx tsc --noEmit
+npm run build
+npm run migrate
+npm run migrate:show
+npm run migrate:revert
+npm run migrate
+npm run seed && npm run seed
+npm run demo:nplus1
+npm run report
+npm run test:orm
+npm test
+npm run lint
+```
+
+Після першого migrate очікується `[X] 1 InitialMarketplace1790499954883`
+(службовий номер може зрости після відкату та повторного застосування). Відкат видаляє чотири
+доменні таблиці, їхні індекси, FK та identity sequences, прибирає metadata
+генерованої колонки; службові таблиці TypeORM можуть залишатися.
+`test:orm` призначений для цього окремого стенда, перевіряє точні fixture-дані.
+
+Після **кожного** запуску seed кількість однакова — 10 / 10 / 10 / 20:
+
+```bash
+docker compose exec -T db psql -X -U app -d marketplace -c 'SELECT (SELECT count(*) FROM users) AS users, (SELECT count(*) FROM products) AS products, (SELECT count(*) FROM orders) AS orders, (SELECT count(*) FROM order_items) AS order_items;'
+```
+
+Статичні перевірки з умови:
+
+```bash
+grep -rn "synchronize" src/
+grep -rn "onDelete" src/
+grep -rniE "\.(add)?groupBy\(" src/
+node -e "const s=require('./package.json').scripts;const bad=['migrate','seed'].filter(k=>/with-secrets\.sh/.test(s[k]||'')===false);console.log(bad.length===0?'OK':'без обгортки: '+bad.join(', '));process.exit(bad.length===0?0:1)"
+```
+
+### N+1: фактичні виміри
+
+Граф: `orders → items → product`, два рівні, по дві позиції на замовлення.
+Наївно: 1 запит списку + N запитів позицій + 2N запитів товарів = 1 + 3N.
+JOIN завантажує той самий граф одним запитом; скрипт перевіряє рівність результатів.
+
+| N | До (запити в циклах) | Після (leftJoinAndSelect) |
+| --- | --- | --- |
+| 5 | 16 | 1 |
+| 10 | 31 | 1 |
+
+Лічильник скидається після initialize і перед кожною вибіркою. SQL друкується
+через logger із `logging: ['query']`; службові запити відкриття з’єднання
+не входять у вимір. Вибірка обмежена предикатом ID, тому JOIN не додає
+окремого запиту pagination. Seed резервує ID 1..10; демо виконується після seed.
+Стратегія `relationLoadStrategy: 'query'` не використовується.
+
+### Repository, QueryBuilder, onDelete
+
+Repository застосовуємо для простих CRUD і вибірок entities зі зв’язками.
+QueryBuilder застосовуємо для контрольованих JOIN та агрегатів із GROUP BY,
+які не виразити через `find()`; звіт використовує `getRawMany()`.
+Виторг враховує лише `paid`/`shipped`, бере історичний `unit_price_cents`,
+а не поточну ціну товару; множення виконується як bigint, SUM/COUNT лишаються
+рядками. Наприклад, Product 01: 3 одиниці, 3000 копійок; увесь звіт — 25700 копійок.
+
+- `orders.user_id → users`: RESTRICT захищає історію замовлень клієнта.
+- `order_items.product_id → products`: RESTRICT захищає посилання на придбаний товар.
+- `order_items.order_id → orders`: CASCADE прибирає позиції разом із замовленням.
+
+### Міграції та seed
+
+Початкову міграцію отримано на порожній БД командою:
+
+```bash
+npm run build
+npm run migration:generate -- src/migrations/InitialMarketplace
+npm run build
+```
+
+Це історія генерації: **не повторюй** її поруч із готовою початковою міграцією.
+Для наступної зміни спочатку застосуй наявні міграції, зміни entities,
+збери код і генеруй міграцію з новою назвою.
+Генератор перевірено вручну: додано covering/partial/expression/GIN індекси
+ДЗ №12, прибрано прив’язку metadata до конкретної назви БД.
+Їхні `@Index(..., { synchronize: false })` не дозволяють генератору видалити
+ручні індекси. `schema:log` після міграції не знаходить відмінностей.
+Про складні індекси: [офіційна документація TypeORM](https://typeorm.io/docs/advanced-topics/indices/).
+
+Seed має фіксовані значення й дати, `ON CONFLICT (PK) DO NOTHING` та транзакцію.
+Другий запуск не дублює і не перезаписує рядки. Identity sequences після явних
+ID просуваються щонайменше до max(id), тому наступні INSERT без ID працюють.
+Це fixture для навчальної БД, не production seed.
+
+### Основний запуск через сховище ДЗ №11
+
+Встанови [офіційний Infisical CLI](https://infisical.com/docs/cli/overview).
+Сховище та machine identity використовуються ті самі, що в ДЗ №11–12.
+Окрема папка `/hw13` зберігає DB_URL нового стенда й не змінює стару базу/ротацію.
+
+```bash
+docker compose up -d --wait
+npm run infisical:up
+npm run infisical:setup
+npm run infisical:setup:orm
+unset SKIP_VAULT
+npm run build
+npm run migrate
+npm run seed
+npm run demo:nplus1
+npm run report
+```
+
+`with-secrets.sh` читає наявні `secrets/infisical/client.json` і `app-token`,
+викликає `infisical run --env=dev --path=/hw13 -- …`; CLI наповнює process.env.
+DataSource не читає env-файлів і не імпортує Nest ConfigModule.
+Для іншого сховища можна передати INFISICAL_TOKEN, INFISICAL_PROJECT_ID,
+INFISICAL_API_URL, INFISICAL_SECRET_PATH через оточення або ігнорований
+`.secrets/infisical.env` (лише параметри доступу до сховища, не DB-креденшели).
+SKIP_VAULT обробляється після відокремлення `dev` та до читання файлів/виклику CLI.
+Про ін’єкцію: [infisical run](https://infisical.com/docs/cli/commands/run).
+
 ## ДЗ №12 — PostgreSQL: схема, індекси та пошук
 
 Для перевірки ДЗ №12 потрібні Docker Compose v2 і Python 3. Використовуй окремий
 `docker-compose.hw12.yml`: PostgreSQL 17, власний volume, порт `127.0.0.1:5433`,
-без залежності від `.env` та локального файла секретів. Це ізольований навчальний стенд; наявний
-`docker-compose.yml` і база попереднього ДЗ залишаються без змін.
+без залежності від `.env` та локального файла секретів. Це ізольований навчальний стенд; попередній Compose із файловим секретом збережено як
+`docker-compose.file-secrets.yml`; стандартний `docker-compose.yml` тепер належить ДЗ №13.
 Усі команди нижче — з кореня репозиторію.
 
 Підняти базу (працює зі свіжого клону):
@@ -63,9 +226,7 @@ for pass in 1 2 3; do for n in 1 2 3 4; do docker compose -f docker-compose.hw12
 із `dev` / `prod` реалізовано через локальний Infisical — див. розділ
 Configuration нижче. Для грейдера SQL-стенд запускається незалежно від Infisical.
 
-Перевірка свіжого клону з віддаленої гілки потребує публікації змін; у поточній
-роботі коміти та push не виконуються. Локальна перевірка копії без `.env`,
-`secrets/` і `node_modules/` описана у звіті.
+Перевірка ДЗ №12 у копії без `.env`, `secrets/` і `node_modules/` описана у звіті.
 
 Цей репозиторій містить наскрізний курсовий проєкт — сервіс **Marketplace API**, спроєктований відповідно до вимог надійності, масштабованості та контрактної специфікації.
 
@@ -217,7 +378,7 @@ curl -i 'http://localhost:3000/products/999'
 
 ## Configuration
 
-Поточний режим ДЗ №12 — локальний **Infisical** (`http://localhost:8088`),
+Режим ДЗ №11–12 — локальний **Infisical** (`http://localhost:8088`),
 Nest на хості та база `marketplace` із `docker-compose.hw12.yml` на `127.0.0.1:5433`.
 Потрібні Docker Compose v2, Node.js 22.22.3+ та npm.
 
@@ -250,7 +411,7 @@ npm run start:infisical -- dev
 лише `app-token` identity з роллю `viewer` у цьому проєкті та `no-access` в організації.
 Уся тека `secrets/` ігнорується Git і Dockerfile-контекстом; значення не друкуються скриптами.
 
-Запуск використовує офіційний REST API Infisical, тому CLI та SDK встановлювати не потрібно.
+Запуск Nest у ДЗ №11–12 використовує офіційний REST API Infisical, тому CLI та SDK для нього не потрібні. ORM-команди ДЗ №13 використовують Infisical CLI, як вимагає нове завдання.
 Версію й параметри стенда звірено з [офіційним Compose Infisical](https://github.com/Infisical/infisical/blob/v0.165.16/docker-compose.prod.yml);
 схема API запущеної версії доступна на `http://localhost:8088/api/docs/json`.
 Скрипт читає DB_URL зі сховища й передає його дочірньому процесу Nest у пам’яті.
@@ -340,12 +501,12 @@ node --input-type=module -e 'import { randomBytes } from "node:crypto"; import {
 
 ```bash
 npm run check:env
-docker compose -f docker-compose.yml up -d db
-docker compose -f docker-compose.yml exec db sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+docker compose -f docker-compose.file-secrets.yml up -d db
+docker compose -f docker-compose.file-secrets.yml exec db sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 npm run start
 ```
 
-Дочекайся `accepting connections` перед запуском Nest. За потреби переглянь `docker compose -f docker-compose.yml logs --tail=30 db`. Використання явного `-f` гарантує вибір потрібного файла, навіть якщо поруч залишився `compose.yml`.
+Дочекайся `accepting connections` перед запуском Nest. За потреби переглянь `docker compose -f docker-compose.file-secrets.yml logs --tail=30 db`. Використання явного `-f` гарантує вибір потрібного файла, навіть якщо поруч залишився `compose.yml`.
 
 `start` виконує збірку та запускає `node dist/main.js` без watch. Для розробки є `npm run start:dev`.
 
@@ -363,7 +524,7 @@ Compose передає файл секрету в `/run/secrets/postgres_passwor
 
 Volume `postgres_data` зберігає дані й пароль БД між перезапусками. Зміна `.env` або файла секрету сама по собі не змінює роль чи пароль у вже ініціалізованій БД — для пароля використовуй ротацію нижче.
 
-`docker compose -f docker-compose.yml down` зберігає volume. Варіант `down -v` видаляє всі дані БД; наступний запуск створить БД з поточним паролем із файла. У цій реалізації немає фіксованого пароля з `init.sql`, до якого потрібно повертати файл після видалення volume.
+`docker compose -f docker-compose.file-secrets.yml down` зберігає volume. Варіант `down -v` видаляє всі дані БД; наступний запуск створить БД з поточним паролем із файла. У цій реалізації немає фіксованого пароля з `init.sql`, до якого потрібно повертати файл після видалення volume.
 
 ### Ротація без рестарту Nest
 
