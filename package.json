@@ -11,7 +11,7 @@
     "start:infisical": "npm run build && node scripts/start-infisical.mjs",
     "rotate:infisical": "node scripts/rotate-infisical.mjs",
     "check:infisical": "npm run build && node scripts/check-infisical.mjs",
-    "build": "nest build",
+    "build": "tsc -p tsconfig.build.json",
     "deploy": "nest deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "npm run build && node dist/main.js",
@@ -29,7 +29,16 @@
     "spec:check": "npm run spec:bundle && node scripts/check-spec.mjs",
     "test:contract": "npm run build && node --test test/contract.test.mjs",
     "check:homework": "npm run spec:lint && npm run spec:check && npm run test:contract",
-    "check:env": "npm run build && node scripts/check-env-example.mjs"
+    "check:env": "npm run build && node scripts/check-env-example.mjs",
+    "migrate": "bash scripts/with-secrets.sh dev typeorm migration:run -d dist/data-source.js",
+    "migrate:show": "bash scripts/with-secrets.sh dev typeorm migration:show -d dist/data-source.js",
+    "migrate:revert": "bash scripts/with-secrets.sh dev typeorm migration:revert -d dist/data-source.js",
+    "migration:generate": "bash scripts/with-secrets.sh dev typeorm migration:generate -d dist/data-source.js",
+    "seed": "bash scripts/with-secrets.sh dev node dist/seed.js",
+    "demo:nplus1": "bash scripts/with-secrets.sh dev node dist/demo-nplus1.js",
+    "report": "bash scripts/with-secrets.sh dev node dist/report.js",
+    "test:orm": "bash scripts/with-secrets.sh dev node --test test/orm/*.test.mjs",
+    "infisical:setup:orm": "node scripts/setup-infisical-orm.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
@@ -40,6 +49,7 @@
     "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "typeorm": "0.3.31",
     "zod": "^4.5.4"
   },
   "devDependencies": {
