@@ -1,5 +1,72 @@
 # Архітектурна записка курсового проєкту: Marketplace API
 
+## Data layer ops — ДЗ №15
+
+`docker compose up -d --wait` піднімає PostgreSQL 17 і PgBouncer 1.25.2.
+Застосунок/ORM підключається до `127.0.0.1:6432`; прямий порт PostgreSQL 5434
+залишається лише для локального адміністрування. Конфіг —
+`pgbouncer/pgbouncer.ini`, `pool_mode = transaction`, `default_pool_size = 5`,
+`max_client_conn = 200`, `admin_users = app`. Пароль у userlist.txt — відкритий
+дев-пароль цього Compose, не production-секрет.
+
+Transaction mode повертає серверне з’єднання в пул після COMMIT/ROLLBACK:
+багато клієнтів ділять 5 backend-з’єднань, а транзакція checkout залишається на
+одному backend. Не можна покладатися на session-level SET, LISTEN, session
+advisory locks та тимчасові таблиці, що мають пережити транзакцію. SQL
+PREPARE/DEALLOCATE також несумісні; protocol-level named prepared statements
+підтримуються налаштуванням `max_prepared_statements = 200` у цій версії.
+Деталі: [офіційна матриця PgBouncer](https://www.pgbouncer.org/features.html).
+
+Наявна команда `npm run infisical:setup:orm` оновлює DB_URL у локальних
+навчальних dev/prod: `/hw13` для ORM-обгортки та `/` для Nest launcher.
+Після зміни адреси запущений Nest потрібно перезапустити. Обидва оточення
+навчальні; команда використовує дев-креденшели Compose. Нових env-файлів немає,
+`.env.example` містить лише контракт із фейковим паролем. Для основного шляху
+потрібні запущене локальне сховище й Infisical CLI, як у ДЗ13.
+
+```bash
+npm run infisical:setup:orm
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
+```
+
+Backup створює `backups/marketplace-<UTC-дата>-<pid>.dump` через `pg_dump -Fc`.
+Поруч зберігає `.checks.sql` і `.expected.txt`: кількість рядків кожної таблиці
+public та `sum(price_cents * stock)` для products. Дамп і контрольні значення
+беруться з одного REPEATABLE READ snapshot через `pg_export_snapshot()` і
+`pg_dump --snapshot`; після backup поточна БД може змінюватись. Архів публікується
+лише після успіху pg_dump. [Параметри pg_dump](https://www.postgresql.org/docs/17/app-pgdump.html).
+Тримай три файли одного backup разом. `BACKUP_DIR` може перевизначити локальну
+теку; за замовчуванням `backups/` ігнорується Git. Це локальний backup на хості,
+він не захищає від втрати самого диска хоста.
+
+Restore-drill бере останній завершений дамп, створює новий контейнер
+PostgreSQL з порожнім tmpfs, без мережі й опублікованих портів, виконує
+`pg_restore --no-owner --no-acl --exit-on-error`, порівнює контрольні значення
+та друкує MATCH. Контейнер і його тимчасове сховище видаляються після успіху
+або помилки; джерельна БД не змінюється. На ще не мігрованій порожній БД
+перевіряється порожня схема; змістовний drill курсового виконуй після migrate/seed.
+Фактичний протокол: [RESTORE-DRILL.md](RESTORE-DRILL.md).
+
+Скрипти потребують Bash, Docker Compose v2 і Node.js; PostgreSQL-клієнти беруть
+із контейнера `db`, тому локальні pg_dump/pg_restore не обов’язкові. URL до
+`127.0.0.1:6432` або `localhost:6432` всередині клієнтського контейнера
+перетворюється на `pgbouncer:5432`; пароль і назва БД зберігаються.
+
+`backup.cron` задає запуск щодня о 02:00 у часовому поясі хоста. Для встановлення
+заміни `/absolute/path/to/repo` своїм шляхом і додай рядок через `crontab -e`,
+перевіривши PATH до Docker/Node/Infisical. Cron автоматично не встановлюється.
+RPO при успішних щоденних backup — до 24 годин; пропущені запуски збільшують його.
+
+Адмін-консоль (дев-пароль із Compose):
+
+```bash
+PGPASSWORD=homework-development-only psql -h 127.0.0.1 -p 6432 -U app -d marketplace -c 'SELECT 1'
+PGPASSWORD=homework-development-only psql -h 127.0.0.1 -p 6432 -U app -d pgbouncer -c 'SHOW POOLS'
+# Якщо psql немає на хості:
+docker compose exec -T -e PGPASSWORD=homework-development-only pgbouncer psql -h 127.0.0.1 -U app -d pgbouncer -c 'SHOW POOLS'
+```
+
 ## ДЗ №14 — Конкурентність
 
 Checkout у `src/transactions/checkout.ts` в одній транзакції зменшує stock,
@@ -86,19 +153,29 @@ ORM-шар не змінює наявний HTTP API з товарами в па
 
 Потрібні Node.js 22.22.3+ (або 24.15+), npm, Docker Compose v2.
 Виконувати в корені свіжого клону; `.env`, `.secrets/`, `secrets/` та Infisical CLI
-для цього сценарію не потрібні. Порт 5434 має бути вільний.
+для цього сценарію не потрібні. Порти 5434 і 6432 мають бути вільними.
 Compose має власний volume і healthcheck; дев-креденшели не є секретом.
 
 ```bash
 docker compose up -d --wait
 
-export DB_HOST=127.0.0.1 DB_PORT=5434 DB_USER=app DB_PASSWORD=homework-development-only DB_NAME=marketplace
+export DATABASE_URL=postgres://app:homework-development-only@127.0.0.1:6432/marketplace
 
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
 ```
 
-Якщо поточна оболонка вже має `DB_URL`, виконай `unset DB_URL`: URL має пріоритет
-над окремими DB_*; у свіжому оточенні це не потрібно.
+Скрипти читають DATABASE_URL (або DB_URL) із середовища; обгортка під
+SKIP_VAULT=1 лише передає його. DATABASE_URL має пріоритет в ORM і ops-скриптах.
+Після export вище мінімальна перевірка ДЗ15 — ці дві команди (навіть на порожній БД):
+
+```bash
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh
+```
+
+Для перевірки на даних курсового спочатку виконай migrate/seed нижче, потім
+повтори backup/drill. Додаткові перевірки ДЗ13/14 наведено для регресії.
+`test:orm` історично читає DB_URL, тому для нього передай `DB_URL="$DATABASE_URL"`.
 
 ```bash
 npm ci && npx tsc --noEmit
@@ -110,7 +187,7 @@ npm run migrate
 npm run seed && npm run seed
 npm run demo:nplus1
 npm run report
-npm run test:orm
+DB_URL="$DATABASE_URL" npm run test:orm
 npm run test:transactions
 npm run demo:race
 npm run demo:workers
@@ -128,7 +205,7 @@ npm run lint
 
 Нові демо, як migrate/seed, починаються з `bash scripts/with-secrets.sh dev`:
 звичайний шлях — чинне сховище Infisical `/hw13`, шлях грейдера — `SKIP_VAULT=1`
-і DB_* з Compose. Нових env-файлів чи змін обгортки немає.
+і DATABASE_URL з Compose. Нових env-файлів чи змін обгортки немає.
 
 Після **кожного** запуску seed кількість однакова — 10 / 10 / 10 / 20:
 
@@ -214,7 +291,8 @@ ID просуваються щонайменше до max(id), тому наст
 
 Встанови [офіційний Infisical CLI](https://infisical.com/docs/cli/overview).
 Сховище та machine identity використовуються ті самі, що в ДЗ №11–12.
-Окрема папка `/hw13` зберігає DB_URL нового стенда й не змінює стару базу/ротацію.
+Папка `/hw13` зберігає DB_URL ORM-стенда. Починаючи з ДЗ15, setup оновлює
+також root DB_URL для Nest; історичні команди ротації ДЗ12 більше не застосовуються.
 
 ```bash
 docker compose up -d --wait
@@ -494,7 +572,14 @@ npm run start:infisical -- dev
 Zod перевіряє конфігурацію до створення Nest-провайдерів; при помилці секретні значення
 не включаються в повідомлення. Нових env-файлів із DB_URL немає.
 
-### Ротація та перевірка Infisical
+### Ротація та перевірка Infisical (історичний стенд ДЗ12)
+
+Після переходу ДЗ15 на PgBouncer команди `rotate:infisical` та
+`check:infisical` нижче **не застосовуються**: вони прив’язані до окремої БД
+ДЗ12 на 5433 і її root-secret. Root DB_URL тепер вказує на базу курсового через
+6432. Старий скрипт відмовиться працювати з новою адресою. Для PgBouncer
+ротація потребуватиме узгодженого оновлення пароля Postgres, userlist і сховища;
+реалізація цієї ротації не входить у ДЗ15.
 
 При запущеному через Infisical застосунку:
 

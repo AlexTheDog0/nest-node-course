@@ -30,3 +30,6 @@ secrets/
 !.vscode/extensions.json
 
 .secrets/
+
+/backups/
+/backups-cron.log

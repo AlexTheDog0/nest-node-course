@@ -6,3 +6,6 @@ dist/
 
 .git/
 .secrets/
+
+backups/
+backups-cron.log

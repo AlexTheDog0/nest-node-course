@@ -14,7 +14,8 @@ function required(name: string): string {
 }
 
 function connection() {
-  if (process.env.DB_URL) return { url: process.env.DB_URL };
+  const url = process.env.DATABASE_URL || process.env.DB_URL;
+  if (url) return { url };
   const port = Number(required('DB_PORT'));
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('DB_PORT must be an integer between 1 and 65535');

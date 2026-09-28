@@ -17,5 +17,21 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:6432:5432'
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: [CMD-SHELL, 'PGPASSWORD=homework-development-only psql -h 127.0.0.1 -U app -d marketplace -tAc "SELECT 1" | grep -qx 1']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
 volumes:
   postgres_data:
