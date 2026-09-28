@@ -1,5 +1,60 @@
 # Архітектурна записка курсового проєкту: Marketplace API
 
+## ДЗ №14 — Конкурентність
+
+Checkout у `src/transactions/checkout.ts` в одній транзакції зменшує stock,
+списує баланс у копійках, створює paid-замовлення, його позицію та задачу.
+Недостатній stock або баланс відхиляє всю операцію. Нова міграція
+`1790600000000-CheckoutQueue.ts` додає `users.balance_cents` і таблицю `jobs`;
+`synchronize: false` збережено. `bigint` суми та ID представлені рядками,
+обчислення вартості виконуються через `BigInt`.
+
+Обрано атомарний `UPDATE … WHERE stock >= quantity RETURNING`, а для балансу —
+аналогічний умовний UPDATE. PostgreSQL перевіряє умову та змінює значення під
+блокуванням рядка; немає проміжку між читанням і записом у JavaScript.
+`SELECT FOR UPDATE` також коректний, але для одного товару й простого декременту
+потребував би окремого читання. Ціна береться з того самого RETURNING.
+Усі запити йдуть через manager однієї транзакції, не через загальний пул.
+
+Воркери тримають `FOR UPDATE SKIP LOCKED` до завершення обробки. Результат,
+`status=done`, `worker_id` і `processed=processed+1` комітяться разом.
+Якщо вільної задачі немає, воркер перевіряє наявність pending-рядків і повторює
+пошук: вони можуть бути заблоковані іншим воркером. Частковий індекс
+`idx_jobs_pending` індексує лише чергу очікування. Падіння до COMMIT відкочує
+результат і звільняє задачу; повторний запуск підбере її. Гарантія «рівно один
+раз» стосується закоміченого результату в БД. Реальний email/API-виклик потребує
+ідемпотентного одержувача; демо зберігає текст чека, не надсилає листи.
+
+Retry повторює **всю транзакцію разом із читаннями**, лише для PostgreSQL
+`40001` (serialization failure) та `40P01` (deadlock): обидва означають, що
+транзакцію скасовано через конкуренцію. Помилки валідації, обмежень, доступу
+або невідомий результат COMMIT не можна сліпо повторювати. Ліміт — 5 спроб,
+експоненційний backoff із jitter; кожен повтор логується. Демо через бар’єр
+гарантує два початкові знімки `REPEATABLE READ`, тому конфлікт відтворюється.
+
+Фактичний запуск 28.09.2026 (Node.js 24, PostgreSQL 17):
+
+| Демо | Результат |
+| --- | --- |
+| `demo:race` | 50 спроб, 10 успішних, stock 0, від’ємних рядків 0 |
+| `demo:workers` | 12 задач; 3 воркери по 4; 444.1 ms проти ≥1200 ms послідовно; оброблено двічі: 0 |
+| `demo:retry` | 1 повтор із 40001; баланс 100 + 1 + 1 = 102 |
+
+Демо незалежні: створюють власних покупців із надлишковим балансом і товари,
+перевіряють інваріанти через assert та прибирають лише власні записи у finally.
+Всі 50 checkout запускаються через `Promise.all` без черги застосунку;
+пул PostgreSQL може обмежувати кількість одночасних з’єднань. Звичайний seed
+також задає новим покупцям баланс 1 000 000 копійок, не поповнюючи існуючих.
+
+| Файли | Призначення |
+| --- | --- |
+| `src/transactions/checkout.ts` | Транзакційна бізнес-операція |
+| `src/transactions/workers.ts` | Пул воркерів із SKIP LOCKED |
+| `src/transactions/retry.ts` | Обмежений retry транзакцій |
+| `src/demos/{race,workers,retry,fixture}.ts` | Самоперевірні демо та ізольовані дані |
+| `src/entities/job.entity.ts`, `src/migrations/1790600000000-CheckoutQueue.ts` | Черга та міграція |
+| `test/transactions/` | Rollback, баланс, bigint, відновлення воркера, коди retry |
+
 ## ДЗ №13 — TypeORM
 
 Чотири entities у `src/entities/` відтворюють таблиці ДЗ №12: `users`,
@@ -56,15 +111,24 @@ npm run seed && npm run seed
 npm run demo:nplus1
 npm run report
 npm run test:orm
+npm run test:transactions
+npm run demo:race
+npm run demo:workers
+npm run demo:retry
 npm test
 npm run lint
 ```
 
-Після першого migrate очікується `[X] 1 InitialMarketplace1790499954883`
-(службовий номер може зрости після відкату та повторного застосування). Відкат видаляє чотири
-доменні таблиці, їхні індекси, FK та identity sequences, прибирає metadata
-генерованої колонки; службові таблиці TypeORM можуть залишатися.
-`test:orm` призначений для цього окремого стенда, перевіряє точні fixture-дані.
+Після migrate застосовані дві міграції: `InitialMarketplace1790499954883`
+та `CheckoutQueue1790600000000`. Один `migrate:revert` відкочує лише останню:
+видаляє jobs і balance_cents, зберігає таблиці ДЗ13. Це також видаляє дані черги
+та балансів; команда вище призначена для чистого навчального стенда до seed.
+Повторний migrate відновлює структуру. `test:orm` перевіряє точні fixture-дані
+ДЗ13, нові демо після завершення залишають їх незмінними.
+
+Нові демо, як migrate/seed, починаються з `bash scripts/with-secrets.sh dev`:
+звичайний шлях — чинне сховище Infisical `/hw13`, шлях грейдера — `SKIP_VAULT=1`
+і DB_* з Compose. Нових env-файлів чи змін обгортки немає.
 
 Після **кожного** запуску seed кількість однакова — 10 / 10 / 10 / 20:
 
@@ -80,6 +144,17 @@ grep -rn "onDelete" src/
 grep -rniE "\.(add)?groupBy\(" src/
 node -e "const s=require('./package.json').scripts;const bad=['migrate','seed'].filter(k=>/with-secrets\.sh/.test(s[k]||'')===false);console.log(bad.length===0?'OK':'без обгортки: '+bad.join(', '));process.exit(bad.length===0?0:1)"
 ```
+
+Статичні критерії ДЗ14 (із кореня репозиторію):
+
+```bash
+grep -rniE --include='*.ts' --exclude-dir=node_modules --exclude-dir=dist "for update|returning|pessimistic_write" .
+grep -rniE --include='*.ts' --exclude-dir=node_modules --exclude-dir=dist "skip[ _]locked" .
+grep -rniE --include='*.ts' --exclude-dir=node_modules --exclude-dir=dist "40001|40P01" .
+node -e "const s=require('./package.json').scripts;const bad=['demo:race','demo:workers','demo:retry'].filter(k=>/with-secrets\.sh/.test(s[k]||'')===false);console.log(bad.length===0?'OK':'без обгортки: '+bad.join(', '));process.exit(bad.length===0?0:1)"
+```
+
+Докази запусків: [docs/HW14-VERIFICATION.md](docs/HW14-VERIFICATION.md).
 
 ### N+1: фактичні виміри
 
