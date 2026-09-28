@@ -9,8 +9,8 @@ try {
       const label = String(id).padStart(2, '0');
       const createdAt = new Date(`2026-01-${label}T12:00:00Z`);
       await manager.query(
-        `INSERT INTO users(id, email, name, created_at)
-        OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4)
+        `INSERT INTO users(id, email, name, created_at, balance_cents)
+        OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, 1000000)
         ON CONFLICT (id) DO NOTHING`,
         [id, `user${label}@example.test`, `User ${label}`, createdAt],
       );

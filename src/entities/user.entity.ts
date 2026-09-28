@@ -10,6 +10,7 @@ import type { Relation } from 'typeorm';
 import { Order } from './order.entity.js';
 
 @Entity('users')
+@Check('chk_users_balance', 'balance_cents >= 0')
 @Check('chk_users_email', `email = btrim(email) AND position('@' IN email) > 1`)
 @Check('chk_users_name', `btrim(name) <> ''`)
 @Index('idx_users_lower_email', { synchronize: false })
@@ -25,6 +26,9 @@ export class User {
 
   @Column({ type: 'text' })
   name: string;
+
+  @Column({ name: 'balance_cents', type: 'bigint', default: 0 })
+  balanceCents: string;
 
   @Column({ name: 'created_at', type: 'timestamptz', default: () => 'now()' })
   createdAt: Date;

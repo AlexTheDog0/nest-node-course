@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { fileURLToPath } from 'node:url';
 import { DataSource } from 'typeorm';
+import { Job } from './entities/job.entity.js';
 import { User } from './entities/user.entity.js';
 import { Product } from './entities/product.entity.js';
 import { Order } from './entities/order.entity.js';
@@ -31,6 +32,6 @@ export const dataSource = new DataSource({
   type: 'postgres',
   ...connection(),
   synchronize: false,
-  entities: [User, Product, Order, OrderItem],
+  entities: [User, Product, Order, OrderItem, Job],
   migrations: [fileURLToPath(new URL('./migrations/*.js', import.meta.url))],
 });
