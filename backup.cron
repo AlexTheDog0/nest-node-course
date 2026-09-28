@@ -1,0 +1,4 @@
+# Install in the host user's crontab; replace /absolute/path/to/repo with the checkout.
+# PATH must include docker, node and infisical (and Docker must be running).
+PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin
+0 2 * * * cd /absolute/path/to/repo && bash scripts/with-secrets.sh dev bash scripts/backup.sh >> backups-cron.log 2>&1

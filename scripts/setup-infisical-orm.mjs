@@ -26,28 +26,25 @@ for (const environment of ['dev', 'prod']) {
       },
     });
   }
-  const query = new URLSearchParams({
-    projectId: client.projectId,
-    environment,
-    secretPath: '/hw13',
-  });
-  const existing = await api(`/api/v4/secrets/DB_URL?${query}`, {
-    token: admin.token,
-    allowMissing: true,
-  });
-  if (!existing)
+  // Both the Nest launcher (/) and ORM wrapper (/hw13) use the course DB via PgBouncer.
+  // dev/prod here are local educational environments, not production infrastructure.
+  for (const secretPath of ['/', '/hw13']) {
+    const query = new URLSearchParams({ projectId: client.projectId, environment, secretPath });
+    const existing = await api(`/api/v4/secrets/DB_URL?${query}`, {
+      token: admin.token,
+      allowMissing: true,
+    });
     await api('/api/v4/secrets/DB_URL', {
       token: admin.token,
-      method: 'POST',
+      method: existing ? 'PATCH' : 'POST',
       body: {
         projectId: client.projectId,
         environment,
-        secretPath: '/hw13',
-        secretValue:
-          'postgresql://app:homework-development-only@127.0.0.1:5434/marketplace',
-        secretComment:
-          'Isolated local HW13 database. Both environments are development fixtures.',
+        secretPath,
+        secretValue: 'postgresql://app:homework-development-only@127.0.0.1:6432/marketplace',
+        secretComment: 'Local course database via PgBouncer; dev/prod are educational fixtures.',
       },
     });
+  }
 }
-console.log('Infisical /hw13 ready in dev/prod; existing secrets preserved.');
+console.log('Infisical DB_URL updated to PgBouncer in dev/prod, / and /hw13.');
