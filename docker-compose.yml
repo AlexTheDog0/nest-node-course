@@ -59,8 +59,9 @@ services:
       PACT_BROKER_DATABASE_USERNAME: pact
       PACT_BROKER_DATABASE_PASSWORD: pact-development-only
       PACT_BROKER_PORT: 9292
+      PACT_BROKER_BASE_URL: ${PACT_BROKER_URL:-http://127.0.0.1:9292}
     ports:
-      - '127.0.0.1:9292:9292'
+      - '127.0.0.1:${PACT_BROKER_HOST_PORT:-9292}:9292'
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:9292/diagnostic/status/heartbeat']
       interval: 5s
