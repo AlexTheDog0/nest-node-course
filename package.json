@@ -23,12 +23,12 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
-    "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
+    "test:e2e": "npm run build && node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.mjs --testPathPatterns=test/e2e",
     "spec:lint": "redocly lint openapi/openapi.yaml",
     "spec:bundle": "redocly bundle openapi/openapi.yaml -o spec.json",
     "spec:check": "npm run spec:bundle && node scripts/check-spec.mjs",
-    "test:contract": "npm run build && node --test test/contract.test.mjs",
-    "check:homework": "npm run spec:lint && npm run spec:check && npm run test:contract",
+    "test:contract": "npm run build && node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.mjs --testPathPatterns=test/contract",
+    "check:homework": "npm run spec:lint && npm run spec:check && npm run test:openapi",
     "check:env": "npm run build && node scripts/check-env-example.mjs",
     "migrate": "bash scripts/with-secrets.sh dev typeorm migration:run -d dist/data-source.js",
     "migrate:show": "bash scripts/with-secrets.sh dev typeorm migration:show -d dist/data-source.js",
@@ -42,7 +42,11 @@
     "demo:race": "bash scripts/with-secrets.sh dev node dist/demos/race.js",
     "demo:workers": "bash scripts/with-secrets.sh dev node dist/demos/workers.js",
     "demo:retry": "bash scripts/with-secrets.sh dev node dist/demos/retry.js",
-    "test:transactions": "bash scripts/with-secrets.sh dev node --test test/transactions/*.test.mjs"
+    "test:transactions": "bash scripts/with-secrets.sh dev node --test test/transactions/*.test.mjs",
+    "test:openapi": "npm run build && node --test test/contract.test.mjs",
+    "test:integration": "npm run build && node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.mjs --testPathPatterns=test/integration",
+    "verify:provider": "npm run build && node test/contract/verify-provider.mjs",
+    "infisical:setup:pact": "node scripts/setup-infisical-pact.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
@@ -61,12 +65,15 @@
     "@nestjs/mau": "^0.2.6",
     "@nestjs/schematics": "^12.0.0",
     "@nestjs/testing": "^12.0.1",
+    "@pact-foundation/pact": "^17.1.4",
     "@redocly/cli": "2.46.0",
+    "@testcontainers/postgresql": "^12.2.0",
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
     "@types/supertest": "^7.0.0",
     "@vitest/coverage-v8": "^4.1.2",
+    "jest": "^30.5.2",
     "oxlint": "^1.58.0",
     "prettier": "^3.4.2",
     "source-map-support": "^0.5.21",
@@ -74,5 +81,8 @@
     "typescript": "^6.0.2",
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^4.1.2"
+  },
+  "engines": {
+    "node": "^22.22.3 || >=24.15.0"
   }
 }

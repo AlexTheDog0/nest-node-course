@@ -9,3 +9,6 @@ dist/
 
 backups/
 backups-cron.log
+
+pacts/
+logs/

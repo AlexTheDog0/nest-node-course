@@ -1,22 +1,20 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { NestFactory } from '@nestjs/core';
+import { startApplication } from './integration/testkit/application.mjs';
 import request from 'supertest';
-import { ProductsModule } from '../dist/products/products.module.js';
 import { ProductsService } from '../dist/products/products.service.js';
-import { configureApp } from '../dist/configure-app.js';
 
-let app, api, service;
+let app, api, service, context;
 const input = { name: 'Notebook', price_cents: 15000, stock: 3 };
 before(async () => {
-  app = await NestFactory.create(ProductsModule, { logger: false });
-  configureApp(app);
-  await app.init();
+  context = await startApplication();
+  app = context.app;
+  await context.database.source.query("INSERT INTO products(name, price_cents, stock) VALUES ('Initial product', 12300, 12)");
   api = request(app.getHttpServer());
   service = app.get(ProductsService);
 });
 after(async () => {
-  await app?.close();
+  await context?.close();
 });
 function problem(response, status) {
   assert.equal(response.status, status);
@@ -41,7 +39,7 @@ test('invalid body and additional fields are rejected before creation', async ()
   ]) {
     problem(await create(body, 'invalid'), 400);
   }
-  assert.equal(service.findPage(100, 0).items.length, 1);
+  assert.equal((await service.findPage(100, 0)).items.length, 1);
 });
 test('valid creation, replay with reordered properties, conflict, and concurrent retries', async () => {
   const first = await create(input, 'create-1');
@@ -61,7 +59,7 @@ test('valid creation, replay with reordered properties, conflict, and concurrent
   ]);
   assert(results.every((r) => r.status === 201));
   assert.deepEqual(results[0].body, results[1].body);
-  assert.equal(service.findPage(100, 0).items.length, 3);
+  assert.equal((await service.findPage(100, 0)).items.length, 3);
 });
 test('cursor pages have no repeats, terminate with null, and allow an empty final result', async () => {
   let cursor,

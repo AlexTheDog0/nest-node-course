@@ -189,7 +189,7 @@ paths:
           schema:
             type: string
             minLength: 1
-          description: Same key with the same body returns the same response without repeating creation. Replay returns 201 and Idempotency-Replay true; a different body returns 422. Keys are retained until process restart.
+          description: Same key with the same body returns the same response without repeating creation. Replay returns 201 and Idempotency-Replay true; a different body returns 422. Keys and their original responses persist in PostgreSQL across process restarts.
       requestBody:
         required: true
         content:
@@ -200,12 +200,16 @@ paths:
               properties:
                 name:
                   type: string
+                  minLength: 1
+                  pattern: '\S'
                 stock:
                   type: integer
                   minimum: 0
+                  maximum: 2147483647
                 price_cents:
                   type: integer
-                  minimum: 0
+                  minimum: 1
+                  maximum: 2147483647
               required:
                 - name
                 - price_cents

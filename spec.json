@@ -16,6 +16,35 @@
   ],
   "security": [],
   "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Checks health of current app",
+        "responses": {
+          "200": {
+            "description": "Healthy!",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "uptime": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Problem during health check!"
+          }
+        }
+      }
+    },
     "/users": {
       "get": {
         "operationId": "listUsers",
@@ -259,7 +288,7 @@
               "type": "string",
               "minLength": 1
             },
-            "description": "Same key with the same body returns the same response without repeating creation. Replay returns 201 and Idempotency-Replay true; a different body returns 422. Keys are retained until process restart."
+            "description": "Same key with the same body returns the same response without repeating creation. Replay returns 201 and Idempotency-Replay true; a different body returns 422. Keys and their original responses persist in PostgreSQL across process restarts."
           }
         ],
         "requestBody": {
@@ -271,15 +300,19 @@
                 "additionalProperties": false,
                 "properties": {
                   "name": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
                   },
                   "stock": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "maximum": 2147483647
                   },
                   "price_cents": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 1,
+                    "maximum": 2147483647
                   }
                 },
                 "required": [

@@ -1,0 +1,107 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  integration-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run test:integration
+      - run: npm run test:e2e
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+      PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      PACT_CONSUMER_VERSION: ${{ github.sha }}
+      PACT_PROVIDER_VERSION: ${{ github.sha }}
+      PACT_BROKER_HOST_PORT: 9293
+      COMPOSE_PROJECT_NAME: pact-ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Require configured broker
+        run: |
+          if [ "$PACT_BROKER_URL" != 'http://127.0.0.1:9292' ] || [ -z "$PACT_BROKER_TOKEN" ]; then
+            echo '::error::Set repository secrets PACT_BROKER_URL=http://127.0.0.1:9292 and a nonempty PACT_BROKER_TOKEN.'
+            exit 1
+          fi
+      - run: npm ci
+      - name: Start isolated Pact Broker
+        run: docker compose up -d --wait pact-db pact-broker
+      - name: Start authenticated gateway and check access
+        run: |
+          node scripts/pact-broker-proxy.mjs > "$RUNNER_TEMP/pact-proxy.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/pact-proxy.pid"
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const url = process.env.PACT_BROKER_URL;
+          let ready = false;
+          for (let attempt = 0; attempt < 30; attempt++) {
+            try {
+              const response = await fetch(url, { signal: AbortSignal.timeout(1000) });
+              assert.equal(response.status, 401);
+              await response.text();
+              ready = true;
+              break;
+            } catch { await new Promise(resolve => setTimeout(resolve, 1000)); }
+          }
+          assert.ok(ready, 'Broker gateway did not start');
+          for (const [token, status] of [
+            [process.env.PACT_BROKER_TOKEN + '-invalid', 401],
+            [process.env.PACT_BROKER_TOKEN, 200],
+          ]) {
+            const response = await fetch(url, {
+              headers: { Authorization: `Bearer ${token}` },
+              signal: AbortSignal.timeout(5000),
+            });
+            assert.equal(response.status, status);
+            await response.text();
+          }
+          console.log('Gateway: missing/wrong token rejected; valid token accepted');
+          JS
+      - name: Generate consumer contract and test gateway
+        run: npm run test:contract
+      - name: Publish consumer contract
+        run: node test/contract/broker.mjs publish
+      - name: Verify provider and publish verification result
+        run: npm run verify:provider
+      - name: Assert can-i-deploy rejects unknown prod version
+        run: |
+          if node test/contract/broker.mjs can-i-deploy > "$RUNNER_TEMP/pact-before-prod.json"; then
+            echo '::error::Gate unexpectedly allowed deployment before prod tag'
+            exit 1
+          else
+            test "$?" -eq 1
+          fi
+          cat "$RUNNER_TEMP/pact-before-prod.json"
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const summary = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/pact-before-prod.json`, 'utf8'));
+          assert.equal(summary.deployable, null);
+          assert.equal(summary.unknown, 1);
+          JS
+      # Homework simulation in a fresh disposable broker, NOT a real deployment.
+      - name: Simulate prod provider for homework
+        run: node test/contract/broker.mjs tag-prod
+      - name: can-i-deploy consumer to prod
+        run: node test/contract/broker.mjs can-i-deploy
+      - name: Stop gateway and remove disposable broker data
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/pact-proxy.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/pact-proxy.pid")" || true
+          fi
+          docker compose down --volumes --remove-orphans
