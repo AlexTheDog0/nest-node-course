@@ -21,19 +21,19 @@ export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
   @Get(':id')
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    const product = this.productsService.findById(id);
+  async findOne(@Param('id', ParseIntPipe) id: number) {
+    const product = await this.productsService.findById(id);
     if (!product) throw new NotFoundException('Product was not found');
     return product;
   }
 
   @Post()
-  create(
+  async create(
     @Body() input: CreateProductInput,
     @Headers('idempotency-key') key: string,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const result = this.productsService.create(input, key);
+    const result = await this.productsService.create(input, key);
     if (result.replay) res.setHeader('Idempotency-Replay', 'true');
     return result.product;
   }

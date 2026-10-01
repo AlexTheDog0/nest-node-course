@@ -1,0 +1,43 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  integration-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run test:integration
+      - run: npm run test:e2e
+  contract:
+    runs-on: ubuntu-latest
+    env:
+      PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+      PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      PACT_CONSUMER_VERSION: ${{ github.sha }}
+      PACT_PROVIDER_VERSION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Generate consumer contract
+        run: npm run test:contract
+      - name: Require configured broker
+        run: test -n "$PACT_BROKER_URL" && test -n "$PACT_BROKER_TOKEN"
+      - name: Publish consumer contract
+        run: node test/contract/broker.mjs publish
+      - name: Verify provider and publish verification result
+        run: npm run verify:provider
+      # The deployed provider's prod tag must be maintained by the deployment workflow.
+      # Tagging an un-deployed candidate here would make the gate meaningless.
+      - name: can-i-deploy consumer to prod
+        run: node test/contract/broker.mjs can-i-deploy

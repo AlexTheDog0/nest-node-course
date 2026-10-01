@@ -33,5 +33,41 @@ services:
       timeout: 5s
       retries: 30
 
+  pact-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pact
+      POSTGRES_PASSWORD: pact-development-only
+      POSTGRES_DB: pact
+    volumes:
+      - pact_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U pact -d pact']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  pact-broker:
+    image: pactfoundation/pact-broker:2.137.0-pactbroker2.118.0
+    depends_on:
+      pact-db:
+        condition: service_healthy
+    environment:
+      PACT_BROKER_DATABASE_ADAPTER: postgres
+      PACT_BROKER_DATABASE_HOST: pact-db
+      PACT_BROKER_DATABASE_NAME: pact
+      PACT_BROKER_DATABASE_USERNAME: pact
+      PACT_BROKER_DATABASE_PASSWORD: pact-development-only
+      PACT_BROKER_PORT: 9292
+    ports:
+      - '127.0.0.1:9292:9292'
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:9292/diagnostic/status/heartbeat']
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
 volumes:
+  pact_data:
   postgres_data:

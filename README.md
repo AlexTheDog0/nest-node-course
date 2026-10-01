@@ -1,5 +1,134 @@
 # Архітектурна записка курсового проєкту: Marketplace API
 
+## Тестування — ДЗ16
+
+Потрібні Docker і Node.js 24.20.0 (`nvm use`, версія в `.nvmrc`).
+Всі команди запускаються з кореня, де лежать package.json і lockfile.
+
+```bash
+npm ci && npx tsc --noEmit
+npm run test:integration
+npm run test:integration
+npm run test:e2e
+npm run test:contract
+npm run verify:provider
+```
+
+Integration та E2E самі піднімають **postgres:16-alpine** через
+`PostgreSqlContainer`; compose, Infisical та локальна `.env` їм не потрібні.
+Ізоляція: окремий контейнер на тестовий файл, `TRUNCATE … RESTART IDENTITY`
+перед кожним тестом. Це дозволяє перевіряти справжні COMMIT і паралельні
+з’єднання checkout, які не помістилися б в одну зовнішню ROLLBACK-транзакцію.
+Пули, Nest і контейнери закриваються в afterAll/finally; два прогони поспіль
+не потребують ручної чистки. [Testcontainers PostgreSQL](https://node.testcontainers.org/modules/postgresql/).
+
+`jest.config.mjs`: `reporters: ['default']`, `verbose: true`, `maxWorkers: 1`.
+Nest компілюється через **tsc** зі збереженням decorator metadata; Jest виконує
+ESM `.mjs` без esbuild/підміни провайдерів. Testkit встановлює DATABASE_URL із
+`container.getConnectionUri()` та `CONFIG_SOURCE=environment` до імпорту AppModule;
+цей режим ігнорує `.env` й не звертається до сховища. Звичайний запуск через
+Infisical залишається доступним.
+
+| Шлях | Що перевіряє |
+| --- | --- |
+| `test/integration/users.test.mjs` | User repository: bigint, UNIQUE 23505, ON CONFLICT |
+| `test/integration/orders.test.mjs` | Order repository: JOIN, FK 23503, історична ціна в агрегації; rollback і 50 конкурентних checkout |
+| `test/integration/testkit/` | Контейнер, міграції, builders aUser/aProduct/anOrder з унікальними дефолтами, повний AppModule |
+| `test/e2e/products.test.mjs` | Supertest: створити → прочитати, запис у БД, health, 404, 400, конкурентна ідемпотентність і 422 |
+| `test/contract/consumer.test.mjs` | Уявний frontend-клієнт → PactV3, matchers, provider state |
+| `test/contract/verify-provider.mjs` | Реальний Nest + testcontainer, stateHandlers сідять PostgreSQL |
+| `test/contract/broker.mjs` | Publish, локальний тег prod і fail-closed can-i-deploy |
+| `.github/workflows/tests.yml` | Integration/E2E та окремий job contract |
+
+Для правдивої provider verification API товарів переведено з пам’яті на
+PostgreSQL. Форма OpenAPI-відповідей збережена; запити тепер відхиляють порожню назву,
+нульову ціну та числа поза діапазоном PostgreSQL integer через 400; міграція
+`1790800000000-ProductCreations.ts` додає збереження ключа, fingerprint і snapshot
+відповіді POST. Створення товару та ключа атомарне; однаковий ключ працює і між
+різними інстансами/рестартами, інше тіло повертає 422. Для звичайного API спочатку
+виконай `npm run build` і migrate через обгортку. Історичні OpenAPI-тести ДЗ9
+збережено як `npm run test:openapi`; `test:contract` тепер означає саме Pact.
+
+Контракт `pacts/MarketplaceWeb-MarketplaceAPI.json` генерується командою
+`test:contract` і ігнорується Git; CI генерує його сам. Interaction
+`GET /products/42` відповідає `/products/{id}` у `openapi/openapi.yaml`;
+включає providerStates. Перевірка шляху входить у consumer-тест, а відповідь
+provider додатково проходить штатний OpenAPI response validator.
+Без PACT_BROKER_URL команда verify:provider перевіряє локальний файл; з URL —
+завантажує контракти з брокера й виставляє `publishVerificationResult: true`.
+[Provider verification у Pact](https://docs.pact.io/implementation_guides/javascript/docs/provider).
+
+### Broker, сховище та відтворення гейта
+
+`docker compose up -d --wait` також піднімає `pact-broker` на **127.0.0.1:9292**
+та його окрему PostgreSQL-базу/volume. Локальний OSS broker без автентифікації,
+доступний лише на loopback; локальне значення токена порожнє. Для зовнішнього
+брокера задай реальні URL/token у сховищі, а в GitHub — у secrets
+`PACT_BROKER_URL` і `PACT_BROKER_TOKEN`, не у файлах репозиторію.
+
+Основний локальний шлях після налаштування Infisical із попередніх ДЗ:
+
+```bash
+npm run infisical:setup:pact
+bash scripts/with-secrets.sh dev node test/contract/broker.mjs publish
+bash scripts/with-secrets.sh dev npm run verify:provider
+```
+
+Setup зберігає обидва параметри у `/hw13` для dev/prod; наявні значення не
+перезаписує, якщо нові не передані через environment. Значення секретів не
+логуються. На цьому хості перевірено запис у сховище через API; Infisical CLI
+не встановлено. Для грейдера передбачено прямий env або ту саму обгортку із
+SKIP_VAULT=1 — вони запускають однаковий verifier:
+
+```bash
+docker compose up -d --wait
+export PACT_BROKER_URL=http://127.0.0.1:9292
+export SKIP_VAULT=1
+export PACT_CONSUMER_VERSION=hw16-demo
+export PACT_PROVIDER_VERSION=hw16-demo
+npm run test:contract
+
+curl --fail-with-body -i -X PUT "$PACT_BROKER_URL/pacts/provider/MarketplaceAPI/consumer/MarketplaceWeb/version/$PACT_CONSUMER_VERSION" -H 'Content-Type: application/json' --data-binary @pacts/MarketplaceWeb-MarketplaceAPI.json
+bash scripts/with-secrets.sh dev npm run verify:provider
+
+# До першого prod-тега: deployable=null, unknown=1.
+curl --fail-with-body -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=MarketplaceWeb&version=$PACT_CONSUMER_VERSION&to=prod"
+
+# Навчальна симуляція вже розгорнутого provider; версія точно та сама, що у verifier.
+curl --fail-with-body -i -X PUT "$PACT_BROKER_URL/pacticipants/MarketplaceAPI/versions/$PACT_PROVIDER_VERSION/tags/prod" -H 'Content-Type: application/json'
+curl --fail-with-body -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=MarketplaceWeb&version=$PACT_CONSUMER_VERSION&to=prod"
+node test/contract/broker.mjs can-i-deploy
+```
+
+Пара unknown → true відтворюється на брокері, де provider ще не має тега prod.
+На вже заповненому брокері відповідь залежить від його історії; перевірка не
+видаляє чужих тегів/контрактів. За замовчуванням версія consumer/provider — git
+SHA, її можна перевизначити змінними вище. CI не ставить prod-тег автоматично:
+це відповідальність процесу фактичного deployment. Job contract виконує
+**publish → verify з публікацією результату → can-i-deploy**; остання команда
+повертає exit 1 для false, null, відсутнього результату або помилки HTTP.
+У CI незадані secrets також завершують job помилкою. GitHub workflow у цій
+сесії не запускався; локальний еквівалент перевірений.
+
+Фактичний запуск **01.10.2026**, consumer/provider version `hw16-20261001`:
+публікація — HTTP 201; provider verification — `has a matching body (OK)`,
+результат опубліковано в broker; тег prod — HTTP 201.
+
+До тега prod (summary відповіді брокера, CLI exit 1):
+
+```json
+{"deployable":null,"reason":"There is no verified pact between version hw16-20261001 of MarketplaceWeb and the latest version of MarketplaceAPI with tag prod (no such version exists)","success":0,"failed":0,"unknown":1}
+```
+
+Після тега prod (summary тієї самої перевірки, CLI exit 0):
+
+```json
+{"deployable":true,"reason":"All required verification results are published and successful","success":1,"failed":0,"unknown":0}
+```
+
+Результати suite: integration **8/8 двічі поспіль**, E2E **5/5**, Pact consumer
+**1/1**, provider verification — OK; попередні OpenAPI **8/8** і unit **10/10**.
+
 ## Data layer ops — ДЗ №15
 
 `docker compose up -d --wait` піднімає PostgreSQL 17 і PgBouncer 1.25.2.
@@ -134,7 +263,7 @@ generated `search_vector` і всі чотири індекси SQL-схеми �
 `unit_price numeric(12,2)` → `unit_price_cents integer`, одиниця — копійка.
 Це початкова міграція **для чистої БД**, а не конвертація заповненої HW12-бази.
 SQL-файли в `db/` залишаються історичним стендом ДЗ №12.
-ORM-шар не змінює наявний HTTP API з товарами в пам’яті.
+У ДЗ13 HTTP API ще працював у пам’яті; з ДЗ16 він використовує PostgreSQL.
 
 Структура:
 
@@ -196,10 +325,9 @@ npm test
 npm run lint
 ```
 
-Після migrate застосовані дві міграції: `InitialMarketplace1790499954883`
-та `CheckoutQueue1790600000000`. Один `migrate:revert` відкочує лише останню:
-видаляє jobs і balance_cents, зберігає таблиці ДЗ13. Це також видаляє дані черги
-та балансів; команда вище призначена для чистого навчального стенда до seed.
+Після migrate застосовані три міграції: `InitialMarketplace1790499954883`,
+`CheckoutQueue1790600000000`, `ProductCreations1790800000000`. Один
+`migrate:revert` відкочує лише останню й видаляє збережені idempotency keys; команда вище призначена для чистого навчального стенда до seed.
 Повторний migrate відновлює структуру. `test:orm` перевіряє точні fixture-дані
 ДЗ13, нові демо після завершення залишають їх незмінними.
 
@@ -342,7 +470,7 @@ docker compose -f docker-compose.hw12.yml exec db psql -X -U app -d marketplace
 (100 000 рядків). Також є `users` (20 000) і `order_items` (200 000), три FK.
 Ціна в SQL — `numeric(12,2)` у гривнях; HTTP-контракт попереднього етапу
 з `price_cents` залишається без змін, майбутній DB-адаптер має конвертувати одиниці.
-Товари API поки зберігаються в пам’яті: це ДЗ готує дата-шар для наступних етапів.
+Історично ДЗ12 готувало дата-шар; у ДЗ16 API товарів уже використовує PostgreSQL.
 
 Повний автоматичний цикл на **порожній** базі:
 ```bash
@@ -466,7 +594,7 @@ npm install
 npm start
 ```
 
-API: `http://localhost:3000`; порт можна змінити через `PORT`. Товари та ключі ідемпотентності зберігаються в пам’яті й скидаються після перезапуску. Початковий товар має ID 1. Ключі діють для POST /products до перезапуску одного процесу; це не розподілене або довготривале сховище.
+API: `http://localhost:3000`; порт можна змінити через `PORT`. Починаючи з ДЗ16 товари та ключі ідемпотентності зберігаються в PostgreSQL. Для звичайного запуску застосуй міграції та seed.
 
 ### Автоматичне приймання
 
@@ -481,7 +609,7 @@ npm run check:homework
 ```bash
 npm run spec:lint
 npm run spec:check
-npm run test:contract
+npm run test:openapi
 npm run build
 ```
 
@@ -626,7 +754,8 @@ npm run check:infisical
 | Змінна | Вимоги | Джерело / приклад |
 | --- | --- | --- |
 | `PORT` | Ціле 1–65535 | Оточення запуску; Infisical launcher: `9999` за замовчуванням |
-| `CONFIG_SOURCE` | `file` або `infisical`; default `file` | Launcher встановлює `infisical` |
+| `CONFIG_SOURCE` | `file`, `infisical` або `environment`; default `file` | Launcher встановлює `infisical` |
+| `DATABASE_URL` | Обов’язковий у режимі `environment` | Testcontainer URI у тестах |
 | `DB_URL` | Обов’язковий для Infisical: PostgreSQL URL із користувачем, паролем і БД, без query-параметрів | **Сховище Infisical**, проєкт Marketplace HW12, `dev` / `prod` |
 | `INFISICAL_API_URL` | Обов’язковий для Infisical | Локальна metadata, `http://localhost:8088` |
 | `INFISICAL_PROJECT_ID` | Обов’язковий для Infisical | `secrets/infisical/client.json` |
@@ -676,7 +805,7 @@ npm run start
 curl -i http://localhost:9999/health
 ```
 
-Якщо змінив `PORT`, підстав його в URL. `/health` виконує `SELECT 1` через пул і після успіху повертає HTTP 200 з `status: "ok"` та числовим `uptime` у секундах. Маршрути товарів поки зберігають дані в пам’яті; для перевірки БД використовуй `/health`.
+Якщо змінив `PORT`, підстав його в URL. `/health` виконує `SELECT 1` через пул і після успіху повертає HTTP 200 з `status: "ok"` та числовим `uptime` у секундах. Маршрути товарів із ДЗ16 теж використовують PostgreSQL.
 
 ### Початковий пароль і збереження даних
 
