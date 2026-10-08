@@ -1,5 +1,181 @@
 # Архітектурна записка курсового проєкту: Marketplace API
 
+## ДЗ18: realtime — WebSocket, SSE, RxJS
+
+Потрібні Node.js 22.22.3+ (або 24.15+), npm і Docker Compose v2. Нижче —
+самодостатній локальний запуск зі свіжого клону на **http://localhost:3000**;
+він використовує навчальну БД курсового через PgBouncer, без Infisical.
+Початкові дані старих ДЗ та старі способи запуску описано нижче.
+
+```bash
+npm ci
+docker compose up -d --wait db pgbouncer
+npm run build
+export CONFIG_SOURCE=environment
+export DATABASE_URL='postgres://app:homework-development-only@127.0.0.1:6432/marketplace'
+export PORT=3000
+node node_modules/typeorm/cli.js migration:run -d dist/data-source.js
+node scripts/setup-realtime.mjs
+npm start
+```
+
+`npm start` виконує `tsc → node dist/main.js`. Setup створює два нові замовлення
+**різних покупців**, випадковий 32-байтовий HMAC-SHA256 ключ у
+`secrets/realtime-token-key` і підписані токени на 24 години у
+`secrets/realtime-demo.json` (права 0600; Git і Dockerfile ігнорують `secrets/`).
+Ключ при повторному setup зберігається, створюються нові навчальні замовлення й
+оновлюються токени. Публічного endpoint видачі токенів немає: це офлайн
+навчальна видача, а не реалізація login. Після закінчення строку токенів повтори
+setup із тим самим DATABASE_URL; ключа не видаляй.
+
+У другому терміналі, з кореня репозиторію:
+
+```bash
+node scripts/realtime-demo.mjs; echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=0
+# exit=0
+
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
+# A_RECEIVED=1
+# B_RECEIVED=1
+# exit=0
+```
+
+Обидва прогони виконують той самий код: підключають Socket.IO клієнтів,
+очікують ack `join`, читають поточний статус, змінюють його через HTTP і
+вимірюють отримані `order.status` за `eventId`, `orderId` і `status`.
+У контрольному режимі B використовує токен власника A і його кімнату.
+Відсутній setup, відмова join, помилка HTTP, відсутня доставка A чи неправильна
+доставка B дають exit 1; загальний timeout — 10 секунд. Для іншого порту:
+`REALTIME_URL=http://localhost:9999 node scripts/realtime-demo.mjs`.
+
+### HTTP і SSE acceptance checks
+
+Умови ДЗ містять curl без credentials. Тут HTTP теж захищений: до цих команд
+потрібно додати `Authorization`, інакше сервер правильно поверне 401.
+Усі змінні нижче зчитуються з підготовленого fixture без правок коду:
+
+```bash
+export BASE_URL=http://localhost:3000
+export ORDER_A=$(node --input-type=module -e 'import {readFileSync} from "node:fs"; console.log(JSON.parse(readFileSync("secrets/realtime-demo.json")).orderA)')
+export TOKEN_A=$(node --input-type=module -e 'import {readFileSync} from "node:fs"; console.log(JSON.parse(readFileSync("secrets/realtime-demo.json")).tokenA)')
+
+curl -sN --max-time 2 -D - -o /dev/null \
+  -H "Authorization: Bearer $TOKEN_A" "$BASE_URL/orders/$ORDER_A/events" \
+  | grep -i '^content-type'
+# Content-Type: text/event-stream
+```
+
+Формат живої події: відкрий потік, а в іншому терміналі з тими самими змінними
+виконай PATCH. Якщо поточний статус уже `paid`, вибери `shipped`.
+
+```bash
+curl -sN --max-time 5 -H "Authorization: Bearer $TOKEN_A" \
+  "$BASE_URL/orders/$ORDER_A/events"
+
+# Паралельно:
+curl -sS -X PATCH -H "Authorization: Bearer $TOKEN_A" \
+  -H 'Content-Type: application/json' -d '{"status":"paid"}' \
+  "$BASE_URL/orders/$ORDER_A/status"
+```
+
+Потік починається з `retry: 1000`, надалі має heartbeat-коментар кожні 15 секунд
+і блоки такого формату (id залежить від попередніх змін):
+
+```text
+id: 1
+event: order.status
+data: {"id":1,"orderId":"11","status":"paid"}
+
+```
+
+Для перевірки replay зроби **чотири фактичні зміни**. Наступні команди спочатку
+читають поточний статус і чергують його, тому повторні запуски також працюють:
+
+```bash
+status=$(curl -sS -H "Authorization: Bearer $TOKEN_A" "$BASE_URL/orders/$ORDER_A" \
+  | node --input-type=module -e 'let s=""; for await(const c of process.stdin) s+=c; console.log(JSON.parse(s).status)')
+for i in 1 2 3 4; do
+  if [ "$status" = shipped ]; then status=paid; else status=shipped; fi
+  curl -sS -X PATCH -H "Authorization: Bearer $TOKEN_A" \
+    -H 'Content-Type: application/json' -d "{\"status\":\"$status\"}" \
+    "$BASE_URL/orders/$ORDER_A/status"
+  printf '\n'
+done
+
+curl -sN --max-time 2 -H "Authorization: Bearer $TOKEN_A" \
+  -H 'Last-Event-ID: 3' "$BASE_URL/orders/$ORDER_A/events" | grep '^id:' | head -1
+# id > 3
+```
+
+`curl --max-time` для відкритого SSE закономірно завершується з кодом 28 після
+вказаного часу; це не помилка серверного потоку. Без Last-Event-ID надходять
+лише нові події. З ним спочатку надходить збережена історія цього замовлення з
+id > N, потім живі зміни. Шина зберігає останні **1000 подій сумарно**; id
+глобально зростає в межах процесу. Старіші за буфер події та історія/id після
+рестарту не відновлюються — для тривалого replay потрібне стале сховище.
+
+`GET /orders/:id` повертає поточний статус;
+`PATCH /orders/:id/status` приймає `pending`, `paid`, `shipped`, `cancelled`.
+ДЗ не задає графа переходів, тому локальне демо допускає повторні переходи між
+ними. Незмінний статус не породжує події. Сервіс блокує рядок `FOR UPDATE`,
+перевіряє власника і публікує подію **після commit**; невдала транзакція не
+повідомляє клієнтів. Зміни напряму SQL не публікують подій.
+
+Socket.IO передає токен у `auth: { token }`, а `join` має payload
+`{ orderId: "11" }` і ack `{ ok: true, room: "orders:11" }` або
+`{ ok: false, status: 401 | 403 | 400 | 404 | 500 }`. HTTP використовує Bearer.
+Чужий власник отримує 403, відсутній/підроблений/прострочений токен — 401.
+Кімнати й SSE закриваються після завершення строку токена; SSE відписується від
+RxJS та очищає таймери при розриві. Для браузерного SSE з Bearer потрібен
+fetch-stream клієнт; стандартний EventSource не дозволяє довільний заголовок.
+
+Файли реалізації:
+
+| Файл | Призначення |
+| --- | --- |
+| `src/orders/orders.gateway.ts` | Авторизований join та emit лише в `orders:<id>` |
+| `src/orders/order-events.service.ts` | Спільний RxJS Subject, буфер і replay |
+| `src/orders/orders.controller.ts` | HTTP статус і SSE з Last-Event-ID |
+| `src/orders/orders.service.ts` | Перевірка власника, транзакційна зміна і публікація після commit |
+| `src/orders/order-token.ts`, `order-auth.service.ts` | Підпис, перевірка строку й автентифікація |
+| `scripts/setup-realtime.mjs` | Локальні fixtures і офлайн видача токенів |
+| `scripts/realtime-demo.mjs` | Основний та контрольний прогони з вимірюванням доставки |
+| `test/realtime/*.test.mjs` | Токени, replay, HTTP/WS, rollback і обидва демо |
+
+```bash
+npm run test:realtime # Docker має працювати; використовується тимчасова тестова БД
+npm test
+npm run lint
+npm run spec:lint
+npm run spec:check
+```
+
+## Trade-offs: WebSocket vs SSE
+
+| Критерій | WebSocket / Socket.IO | SSE |
+| --- | --- | --- |
+| Напрям каналу | Двосторонній; клієнт теж надсилає події | Сервер → клієнт; команди окремим HTTP |
+| Реконект / відновлення | Socket.IO реконектиться; після нього потрібен повторний join і окремий replay | EventSource реконектиться з Last-Event-ID; тут сервер має обмежений replay |
+| Вимоги до інфраструктури | Upgrade, підтримка WS proxy; при polling потрібна sticky session | Звичайний довгий HTTP потік; proxy buffering слід вимкнути й узгодити timeout |
+| Ціна на подію | Компактні фрейми WS, додатковий envelope Socket.IO; потрібно підтримувати з'єднання | Текстовий id/event/data envelope; менше протокольної логіки для простих нотифікацій, теж постійне з'єднання |
+
+Для нотифікацій статусу замовлень у проді я залишив би SSE: потрібен лише
+напрям сервер → клієнт, а HTTP команди вже існують. Last-Event-ID дає зрозумілий
+механізм відновлення, але в проді історію слід зберігати надійно та інтегрувати
+автентифікацію із login-сесією. WebSocket доцільніший, коли потрібна активна
+двостороння взаємодія.
+
+При двох інстансах локальні кімнати, Subject і буфер розділяться, тому частина
+клієнтів втратить події/replay: для WS потрібен Redis-адаптер Socket.IO, а для
+обох транспортів — спільна доставка подій і стале сховище історії з узгодженими id.
+Проміжок між commit і публікацією в пам'яті також потребує transactional outbox,
+якщо продова вимога — доставка без втрат при падінні процесу.
+
+---
+
+
 ## Тестування — ДЗ16
 
 Потрібні Docker і Node.js 24.20.0 (`nvm use`, версія в `.nvmrc`).

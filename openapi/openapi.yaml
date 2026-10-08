@@ -326,7 +326,199 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      summary: Read an owned order
+      security:
+        - orderBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[1-9][0-9]*$'
+            maxLength: 19
+      responses:
+        '200':
+          description: Successful order response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status]
+                properties:
+                  id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [pending, paid, shipped, cancelled]
+        '400':
+          description: Invalid ID, status or Last-Event-ID
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: Missing, invalid or expired token
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Order belongs to another user
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Order was not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /orders/{id}/status:
+    patch:
+      operationId: changeOrderStatus
+      summary: Change an owned order status after a transaction
+      security:
+        - orderBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[1-9][0-9]*$'
+            maxLength: 19
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [pending, paid, shipped, cancelled]
+      responses:
+        '200':
+          description: Successful order response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status]
+                properties:
+                  id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [pending, paid, shipped, cancelled]
+                  eventId:
+                    type: integer
+                    nullable: true
+        '400':
+          description: Invalid ID, status or Last-Event-ID
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: Missing, invalid or expired token
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Order belongs to another user
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Order was not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /orders/{id}/events:
+    get:
+      operationId: streamOrderEvents
+      summary: Stream owned order changes and replay Last-Event-ID
+      security:
+        - orderBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[1-9][0-9]*$'
+            maxLength: 19
+        - name: Last-Event-ID
+          in: header
+          schema:
+            type: string
+            pattern: '^[0-9]+$'
+      responses:
+        '200':
+          description: Successful order response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Invalid ID, status or Last-Event-ID
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: Missing, invalid or expired token
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Order belongs to another user
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Order was not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 components:
+  securitySchemes:
+    orderBearer:
+      type: http
+      scheme: bearer
+      description: Offline-issued HMAC order token; use scripts/setup-realtime.mjs for local demo credentials.
   schemas:
     Problem:
       type: object

@@ -1,3 +1,4 @@
+import { OrdersModule } from './orders/orders.module.js';
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
@@ -13,6 +14,7 @@ import { DatabaseModule } from './database/database.module.js';
       ignoreEnvFile: ignoreLocalEnv(),
     }),
     ProductsModule,
+    OrdersModule,
     DatabaseModule,
   ],
   controllers: [AppController],

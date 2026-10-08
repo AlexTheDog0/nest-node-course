@@ -2,6 +2,7 @@ import * as z from 'zod';
 
 export const schema = z
   .object({
+    REALTIME_TOKEN_SECRET_FILE: z.string().trim().nonempty().optional(),
     PORT: z.coerce.number().int().gt(0).max(65535),
     CONFIG_SOURCE: z.enum(['file', 'infisical', 'environment']).default('file'),
     DATABASE_URL: z
