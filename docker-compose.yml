@@ -1,6 +1,24 @@
 name: marketplace-hw13
 
 services:
+  rabbitmq:
+    image: rabbitmq:4.2-management
+    hostname: marketplace-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: homework-development-only
+    ports:
+      - '127.0.0.1:5672:5672'
+      - '127.0.0.1:15672:15672'
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, check_running]
+      interval: 3s
+      timeout: 10s
+      retries: 40
+      start_period: 15s
+
   db:
     image: postgres:17
     environment:
@@ -70,5 +88,6 @@ services:
       start_period: 20s
 
 volumes:
+  rabbitmq_data:
   pact_data:
   postgres_data:

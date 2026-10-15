@@ -1,3 +1,8 @@
+import { orderPlaced } from '../messaging/event.js';
+import {
+  RabbitPublisher,
+  type EventPublisher,
+} from '../messaging/publisher.js';
 import type { DataSource } from 'typeorm';
 
 export class CheckoutError extends Error {
@@ -15,12 +20,13 @@ export interface CheckoutInput {
 export async function checkout(
   source: DataSource,
   input: CheckoutInput,
+  publisher?: EventPublisher,
 ): Promise<string> {
   const { userId, productId, quantity } = input;
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 2147483647) {
     throw new RangeError('quantity must be a positive PostgreSQL integer');
   }
-  return source.transaction(async (manager) => {
+  const orderId = await source.transaction(async (manager) => {
     // A CTE normalizes TypeORM's driver-specific UPDATE result into SELECT rows.
     const products: { price_cents: number }[] = await manager.query(
       `WITH updated AS (
@@ -53,4 +59,11 @@ export async function checkout(
     await manager.query('INSERT INTO jobs(order_id) VALUES ($1)', [order.id]);
     return order.id;
   });
+  const events =
+    publisher ??
+    (process.env.BROKER_URL
+      ? new RabbitPublisher(process.env.BROKER_URL)
+      : undefined);
+  if (events) await events.publish(orderPlaced(orderId, input));
+  return orderId;
 }

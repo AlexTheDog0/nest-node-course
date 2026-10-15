@@ -1,5 +1,97 @@
 # Архітектурна записка курсового проєкту: Marketplace API
 
+## Async-події через RabbitMQ
+
+ДЗ19 використовує RabbitMQ 4.2 management, AMQP `5672`, UI `http://127.0.0.1:15672`.
+Навчальні креденшели — з compose. Споживач/бутстрап оголошує topic exchange
+`shop.events`, quorum-чергу `shop.order-receipts`, binding `order.placed`,
+окремі fanout DLX і quorum DLQ. Publisher не оголошує топологію.
+Почни з команд у `## Grading`. Для постійного споживача після міграцій:
+`npm run broker:consume`; дочекайся `Order receipt consumer ready` перед checkout.
+
+`checkout()` після COMMIT публікує явно спроєктований контракт:
+`eventId`, `type`, `occurredAt`, `data: { orderId, userId, productId, quantity }`.
+Стабільний `eventId=order.placed:<orderId>` дозволяє повторити публікацію тієї самої
+події. Увімкнено confirm channel + `waitForConfirms`, persistent і mandatory;
+`basic.return` завершує публікацію помилкою при відсутності binding.
+Якщо `BROKER_URL` заданий, checkout використовує RabbitPublisher автоматично;
+третій аргумент дозволяє явно передати publisher. Старі DB-only демо працюють
+без брокера, коли адреса не задана.
+
+Ефект — receipt замовлення у PostgreSQL `order_receipts`. Один атомарний
+`INSERT ... ON CONFLICT DO NOTHING` з унікальними event_id і order_id зберігає
+результат між рестартами й кількома споживачами. Це властивість операції запису,
+а eventId — ключ ідемпотентності. Consumer використовує `noAck: false`;
+ack відправляється тільки після успішного запису або перевіреного конфлікту.
+Невалідний контракт отримує nack з requeue=false; DLQ-демо читає справжній
+`x-first-death-reason`/`x-death`, причина `rejected`. Помилка БД не підтверджує
+повідомлення: worker завершується, брокер повертає доставку наступному worker.
+
+`prefetch=10`: для бюджету обробки receipt до 1 секунди
+`10 × 1 с = 10 с < consumer_timeout 1800 с`; десять паралельних доставок
+відповідають типовому пулу з 10 DB-з'єднань. Це бюджет, не виміряна верхня межа;
+для повільніших ефектів потрібно переглянути prefetch і таймаути.
+
+Це **at-least-once доставка**, а не exactly-once доставка: після запису ефекту
+і до отримання ack з'єднання може обірватися, і брокер надішле подію повторно.
+У `demo:duplicate` після першого запису навмисно викликається
+`nack(message, false, true)`; повторна доставка доходить, але унікальний запис
+не дає подвоїти результат. Ідемпотентний ефект забезпечує один результат.
+Цей receipt одночасно є ефектом та ключем дедуплікації, тому окремої щілини
+«позначив оброблене, але не виконав ефект» тут немає; для іншого ефекту й окремої
+позначки потрібна спільна DB-транзакція. Між COMMIT checkout і публікацією
+залишається щілина втрати події: її закриє transactional outbox у ДЗ22.
+Дефолтне dead lettering не обіцяє at-least-once передачу між work queue та DLQ;
+для quorum at-least-once DLX потрібні також dead-letter-strategy та overflow=reject-publish.
+
+Секрет `BROKER_URL` зберігається поруч із DB_URL у чинному Infisical:
+`npm run infisical:setup:broker` записує адресу локального compose у dev/prod,
+шляхи `/` і `/hw13` (спочатку setup попередніх ДЗ). Три `demo:*` і worker
+запускаються через чинний `with-secrets.sh dev`; нових env-файлів немає.
+Грейдер передає адреси через оточення та `SKIP_VAULT=1`.
+
+Фактичні прогони 15.10.2026, усі з exit 0:
+
+```text
+# npm run demo:publish
+published=5
+delivered=5
+effect=5
+acked=5
+dlq=0
+prefetch=10
+
+# npm run demo:dlq
+rejected=1
+work=0
+dlq=1
+dlq-reason=rejected
+effect=0
+
+# npm run demo:duplicate
+deliveries=2
+effect=1
+skipped=1
+```
+
+| Файл | Відповідальність |
+| --- | --- |
+| `src/messaging/event.ts` | Контракт і стабільний eventId |
+| `src/messaging/topology.ts` | Exchange, quorum work queue, DLX, DLQ, binding, prefetch |
+| `src/messaging/publisher.ts` | Confirm publication і mandatory returns |
+| `src/messaging/consumer.ts` | Validation, manual ack, reject, counters |
+| `src/messaging/effect.ts` | Стійкий ідемпотентний receipt |
+| `src/messaging/worker.ts` | Окремий процес споживача |
+| `src/transactions/checkout.ts` | Публікація після бізнес-транзакції |
+| `src/migrations/1791000000000-OrderReceipts.ts` | Схема ефекту й унікальні ключі |
+| `src/demos/broker.ts` | Три самоочисні демо й перевірки інваріантів |
+| `test/messaging/*.test.mjs` | Контракт, ізоляція демо, unroutable return, COMMIT/rollback, дедуп через новий пул |
+| `scripts/setup-infisical-broker.mjs` | BROKER_URL у чинному сховищі |
+
+Деталі протоколу звірені з [RabbitMQ confirms](https://www.rabbitmq.com/docs/confirms)
+і [dead lettering](https://www.rabbitmq.com/docs/dlx).
+
+
 ## ДЗ18: realtime — WebSocket, SSE, RxJS
 
 Потрібні Node.js 22.22.3+ (або 24.15+), npm і Docker Compose v2. Нижче —
@@ -502,16 +594,36 @@ SQL-файли в `db/` залишаються історичним стендо
 
 Потрібні Node.js 22.22.3+ (або 24.15+), npm, Docker Compose v2.
 Виконувати в корені свіжого клону; `.env`, `.secrets/`, `secrets/` та Infisical CLI
-для цього сценарію не потрібні. Порти 5434 і 6432 мають бути вільними.
+для цього сценарію не потрібні. Порти 5434, 6432, 5672 і 15672 мають бути вільними.
 Compose має власний volume і healthcheck; дев-креденшели не є секретом.
 
 ```bash
 docker compose up -d --wait
 
 export DATABASE_URL=postgres://app:homework-development-only@127.0.0.1:6432/marketplace
+export BROKER_URL=amqp://app:homework-development-only@127.0.0.1:5672
 
 export SKIP_VAULT=1    # у грейдера немає доступу до сховища
 ```
+
+Перевірка ДЗ19 (після export вище):
+
+```bash
+npm ci
+npx tsc --noEmit
+npm run build
+npm run migrate
+npm run demo:publish
+npm run demo:dlq
+npm run demo:duplicate
+npm run test:messaging
+```
+
+Демо також самі застосовують міграції на порожній БД. Демо використовують власні exchange, тому не надсилають
+події звичайному `broker:consume` чи іншим прогонам.
+Кожне демо створює власні порожні quorum-черги й fixtures, після перевірки
+видаляє тільки їх. Власні exchange також видаляються. Кожен прогін має дедлайн
+очікування доставки 30 секунд і повертає ненульовий exit code при порушенні інваріанта.
 
 Скрипти читають DATABASE_URL (або DB_URL) із середовища; обгортка під
 SKIP_VAULT=1 лише передає його. DATABASE_URL має пріоритет в ORM і ops-скриптах.
