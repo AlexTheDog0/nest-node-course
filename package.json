@@ -49,7 +49,13 @@
     "infisical:setup:pact": "node scripts/setup-infisical-pact.mjs",
     "test:realtime": "npm run build && node --test test/realtime/*.test.mjs",
     "realtime:setup": "npm run build && node scripts/setup-realtime.mjs",
-    "realtime:demo": "node scripts/realtime-demo.mjs"
+    "realtime:demo": "node scripts/realtime-demo.mjs",
+    "demo:publish": "bash scripts/with-secrets.sh dev node dist/demos/broker.js publish",
+    "demo:dlq": "bash scripts/with-secrets.sh dev node dist/demos/broker.js dlq",
+    "demo:duplicate": "bash scripts/with-secrets.sh dev node dist/demos/broker.js duplicate",
+    "broker:consume": "bash scripts/with-secrets.sh dev node dist/messaging/worker.js",
+    "test:messaging": "npm run build && bash scripts/with-secrets.sh dev node --test test/messaging/*.test.mjs",
+    "infisical:setup:broker": "node scripts/setup-infisical-broker.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
@@ -58,6 +64,7 @@
     "@nestjs/platform-express": "^12.0.1",
     "@nestjs/platform-socket.io": "^12.1.2",
     "@nestjs/websockets": "^12.1.2",
+    "amqplib": "^2.2.0",
     "express-openapi-validator": "5.6.2",
     "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
@@ -75,6 +82,7 @@
     "@pact-foundation/pact": "^17.1.4",
     "@redocly/cli": "2.46.0",
     "@testcontainers/postgresql": "^12.2.0",
+    "@types/amqplib": "^0.10.8",
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
